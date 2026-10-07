@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use crate::export::{Format, Size};
 use crate::recipe::{self, Recipe};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,12 +12,15 @@ pub struct Settings {
     /// `dark`, `light` or `system`.
     pub appearance: String,
     pub fps: u32,
+    /// Still exports: the file format, and how big.
+    pub format: Format,
+    pub size: Size,
     pub recipe: Recipe,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { scheme: "ferrite".into(), appearance: "dark".into(), fps: 240, recipe: Recipe::default() }
+        Self { scheme: "ferrite".into(), appearance: "dark".into(), fps: 240, format: Format::Png, size: Size::Scale, recipe: Recipe::default() }
     }
 }
 
@@ -32,6 +36,8 @@ impl Settings {
                 "scheme" if !v.is_empty() => s.scheme = v,
                 "appearance" if matches!(v.as_str(), "dark" | "light" | "system") => s.appearance = v,
                 "fps" => s.fps = v.parse().map(|f: u32| f.clamp(12, 240)).unwrap_or(s.fps),
+                "export_format" => s.format = Format::from_key(&v).unwrap_or(s.format),
+                "export_size" => s.size = Size::parse(&v).unwrap_or(s.size),
                 _ => {}
             }
         }
@@ -40,10 +46,12 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "# Darkroom settings.\nscheme = {}\nappearance = {}\nfps = {}\n{}",
+            "# Darkroom settings.\nscheme = {}\nappearance = {}\nfps = {}\nexport_format = {}\nexport_size = {}\n{}",
             self.scheme,
             self.appearance,
             self.fps,
+            self.format.key(),
+            self.size.key(),
             self.recipe.flat_lines()
         )
     }
@@ -87,6 +95,8 @@ mod tests {
             scheme: "cyanotype".into(),
             appearance: "light".into(),
             fps: 25,
+            format: Format::Webp,
+            size: Size::Long(7680),
             recipe: Recipe { mode: Mode::Ascii, algo: Algo::Stucki, palette: "gameboy".into(), cols: 320, gamma: 1.8, ..Recipe::default() },
         };
         assert_eq!(Settings::parse(&s.serialize()), s);

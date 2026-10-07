@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use crate::batch::Job;
+use crate::export::Size;
 use crate::recipe::Recipe;
 use crate::settings::Settings;
 
@@ -23,13 +24,16 @@ Darkroom: dither photos and animations into pixel art.
                                                (into DIR/darkroom unless -o)
 
 OUT's extension picks the format: .png (an APNG for an animation), .gif, .mp4 (needs
-ffmpeg), or text art:
+ffmpeg), a still .jpg .webp .bmp .tif, or text art:
 .txt, .ans (ANSI colour), .html (a film for an animation), .svg.
 
 Options:
   --recipe FILE     a recipe saved from the app (default: the app's last recipe)
   --mask FILE       a painted mask (greyscale PNG, light = subject), for
                     recipes with mask = painted
+  --size SIZE       how big pictures come out: a long edge in pixels (3000),
+                    720p 1080p 1440p 4k 5k 8k, or scale (the recipe's pixel
+                    size, the default); at most 8192
   --scheme KEY      the scheme for the Scheme palette: ferrite mono graphite slate
                     concrete harbor cyanotype phosphor verdigris bruise
   --light, --dark   the scheme's appearance
@@ -48,6 +52,7 @@ enum Command {
 struct Opts {
     recipe: Option<PathBuf>,
     mask: Option<PathBuf>,
+    size: Option<Size>,
     scheme: Option<String>,
     light: Option<bool>,
 }
@@ -63,6 +68,10 @@ fn parse(args: &[String]) -> Result<Option<Command>, String> {
             "--batch" => batch = Some(PathBuf::from(value(&mut it, arg)?)),
             "--recipe" => opts.recipe = Some(PathBuf::from(value(&mut it, arg)?)),
             "--mask" => opts.mask = Some(PathBuf::from(value(&mut it, arg)?)),
+            "--size" => {
+                let v = value(&mut it, arg)?;
+                opts.size = Some(Size::parse(&v).ok_or(format!("--size {v}: use pixels (3000), 1080p, 4k, 8k or scale"))?);
+            }
             "--scheme" => opts.scheme = Some(value(&mut it, arg)?),
             "--light" => opts.light = Some(true),
             "--dark" => opts.light = Some(false),
@@ -90,6 +99,7 @@ fn job(opts: &Opts) -> Result<Job, String> {
     let scheme = opts.scheme.clone().unwrap_or(settings.scheme);
     let light = opts.light.unwrap_or(settings.appearance == "light");
     let mut job = Job::with_scheme(recipe, &scheme, light);
+    job.size = opts.size.unwrap_or(Size::Scale);
     if let Some(path) = &opts.mask {
         let img = image::open(path).map_err(|e| format!("couldn't read the mask {}: {e}", path.display()))?.to_luma8();
         job.paint = Some(crate::mask::Paint::from_image(&img, img.width(), img.height()));
@@ -178,9 +188,15 @@ mod tests {
             Command::File {
                 input: "in.gif".into(),
                 output: "out.gif".into(),
-                opts: Opts { recipe: Some("gb.toml".into()), mask: None, scheme: Some("phosphor".into()), light: Some(true) }
+                opts: Opts { recipe: Some("gb.toml".into()), mask: None, size: None, scheme: Some("phosphor".into()), light: Some(true) }
             }
         );
+    }
+
+    #[test]
+    fn a_size() {
+        let Some(Command::File { opts, .. }) = parse(&args("in.jpg -o out.png --size 8k")).unwrap() else { panic!() };
+        assert_eq!(opts.size, Some(Size::Long(7680)));
     }
 
     #[test]
@@ -195,6 +211,7 @@ mod tests {
         assert!(parse(&args("a.png b.png -o c.png")).unwrap_err().contains("one input"));
         assert!(parse(&args("a.png --wat")).unwrap_err().contains("--wat"));
         assert!(parse(&args("a.png -o")).unwrap_err().contains("needs a value"));
+        assert!(parse(&args("a.png -o b.png --size huge")).unwrap_err().contains("--size"));
         assert_eq!(parse(&args("--help")), Ok(Some(Command::Help)));
     }
 }

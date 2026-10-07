@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-darkroom"
-version = "1.0.0"
+version = "1.1.0"
 description = "A Ferrite dither and text-art studio: photos, GIFs and video into pixel art, braille or ASCII, in twenty-nine algorithms and any palette."
 authors = ["Ryan Wetzstein"]
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "ebf7e
 # Must match ferrite-design exactly (PITFALLS §1).
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8" }
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
 # Exact-palette GIF and APNG encoding (image's own GIF encoder requantises).
 gif = "0.14"
 png = "0.18"

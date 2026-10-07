@@ -15,7 +15,10 @@ mod algos;
 mod batch;
 mod cli;
 mod engine;
+mod export;
+mod glyphs;
 mod mask;
+mod pan;
 mod palettes;
 mod recipe;
 mod render;
@@ -72,6 +75,48 @@ enum View {
     Sheet,
     /// The photo with the background dimmed: paint here, or pick a key colour.
     Mask,
+}
+
+/// How big the print is shown.
+#[derive(Clone, Copy, PartialEq)]
+enum Zoom {
+    /// All of it in view: whole pixels where it fits, shrunk where it doesn't.
+    Fit,
+    /// Whole device pixels per unit (at least one), scrolling past the room;
+    /// then two and four times that.
+    X1,
+    X2,
+    X4,
+}
+
+impl Zoom {
+    const ALL: [Zoom; 4] = [Zoom::Fit, Zoom::X1, Zoom::X2, Zoom::X4];
+    /// Past this, a texture is too big for the GPU.
+    const MAX_TEXTURE: f32 = 16384.;
+
+    fn name(self) -> &'static str {
+        match self {
+            Zoom::Fit => "Fit",
+            Zoom::X1 => "1x",
+            Zoom::X2 => "2x",
+            Zoom::X4 => "4x",
+        }
+    }
+
+    /// Device pixels per unit for content `w`×`h` units in a room
+    /// `room_w`×`room_h` logical pixels big.
+    fn scale(self, w: u32, h: u32, room_w: f32, room_h: f32, sf: f32) -> f32 {
+        let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+        let fit = (room_w / w).min(room_h / h) * sf;
+        let crisp = fit.floor().max(1.);
+        let k = match self {
+            Zoom::Fit if fit < 1. => fit,
+            Zoom::Fit | Zoom::X1 => crisp,
+            Zoom::X2 => crisp * 2.,
+            Zoom::X4 => crisp * 4.,
+        };
+        k.min(Self::MAX_TEXTURE / w.max(h)).max(0.05)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Hash)]
@@ -244,6 +289,9 @@ struct Tile {
     current: bool,
 }
 
+/// Makes an export's bytes, off the main thread.
+type ExportJob = Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>;
+
 /// The typeset text art and the inputs it came from.
 type Typeset = (u64, Rc<TextArt>);
 
@@ -256,6 +304,9 @@ struct Darkroom {
     developed: Option<Developed>,
     tex: Textures,
     view: View,
+    zoom: Zoom,
+    /// A still export is being made.
+    exporting: bool,
     /// Compare's split, 0..1 across the print.
     split: f32,
     sheet: SheetKind,
@@ -302,6 +353,8 @@ impl Darkroom {
             developed: None,
             tex: Textures::default(),
             view: View::Print,
+            zoom: Zoom::Fit,
+            exporting: false,
             split: 0.5,
             sheet: SheetKind::Algorithms,
             tiles: None,
@@ -456,11 +509,10 @@ impl Darkroom {
                 this.sheet = SheetKind::Palettes;
                 this.set_view(View::Sheet, cx)
             })),
-            command("Export PNG…").group("File").icon(Icon::File).shortcut("Ctrl+E").on_run(run(|this, window, cx| this.export_png(window, cx))),
+            command("Export picture…").group("File").icon(Icon::File).shortcut("Ctrl+E").on_run(run(|this, _, cx| this.export_still(cx))),
             command("Export text…").group("File").icon(Icon::File).shortcut("Ctrl+Shift+E").on_run(run(|this, _, cx| this.export_text(cx))),
             command("Export ANSI…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_textart("ans", cx))),
             command("Export HTML…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_textart("html", cx))),
-            command("Export SVG…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_textart("svg", cx))),
             command("Export ASCII film…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_film(cx))),
             command("Copy ASCII").group("File").icon(Icon::Copy).shortcut("Ctrl+Shift+C").on_run(run(|this, _, cx| this.copy_text(cx))),
             command("Back to the sample").group("File").icon(Icon::Refresh).on_run(run(|this, _, cx| {
@@ -488,6 +540,24 @@ impl Darkroom {
             command("Dark theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "dark".into(), window, cx))),
             command("Light theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "light".into(), window, cx))),
         ];
+        for format in export::Format::ALL {
+            let weak = weak.clone();
+            commands.push(command(format!("Export {}…", format.name())).group("File").icon(Icon::File).on_run(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.change(|s| s.format = format, window, cx);
+                    this.export_still(cx);
+                });
+            }));
+        }
+        for zoom in Zoom::ALL {
+            let weak = weak.clone();
+            commands.push(command(format!("Zoom: {}", zoom.name())).group("View").on_run(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.zoom = zoom;
+                    cx.notify();
+                });
+            }));
+        }
         for (i, (name, _)) in recipe::BUNDLED.iter().enumerate() {
             let weak = weak.clone();
             commands.push(command(format!("Recipe: {name}")).group("Recipe").on_run(move |_, cx| {
@@ -942,6 +1012,7 @@ impl Darkroom {
         let ready = self.reel.as_ref().filter(|(k, _)| *k == key).map(|(_, arts)| arts.clone());
         let clip = self.photo.clip.clone();
         let (a, colors, r, paint) = (self.adjust(cx), self.palette_colors(cx), self.settings.recipe.clone(), self.paint.clone());
+        let size = self.settings.size;
         let (ext, label): (&str, &'static str) = match what {
             AnimOut::Gif => ("gif", "GIF"),
             AnimOut::Apng => ("png", "APNG"),
@@ -961,10 +1032,10 @@ impl Darkroom {
                     };
                     let delays = sequence::delays(&clip.frames, r.speed);
                     match what {
-                        AnimOut::Gif => sequence::gif(&arts, &delays, r.scale, r.look()),
-                        AnimOut::Apng => sequence::apng(&arts, &delays, r.scale, r.look()),
-                        AnimOut::Sheet => sequence::sprite_sheet(&arts, r.scale, r.look()),
-                        AnimOut::Mp4 => sequence::mp4(&arts, &delays, r.scale, r.look()),
+                        AnimOut::Gif => sequence::gif(&arts, &delays, size, r.scale, r.look()),
+                        AnimOut::Apng => sequence::apng(&arts, &delays, size, r.scale, r.look()),
+                        AnimOut::Sheet => sequence::sprite_sheet(&arts, size, r.scale, r.look()),
+                        AnimOut::Mp4 => sequence::mp4(&arts, &delays, size, r.scale, r.look()),
                     }
                 })
                 .await;
@@ -1056,7 +1127,7 @@ impl Darkroom {
     fn batch(&mut self, cx: &mut Context<Self>) {
         let dirs = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Develop folder".into()) });
         let (paper, ink) = self.scheme_inks(cx);
-        let job = batch::Job { recipe: self.settings.recipe.clone(), paper, ink, paint: self.paint.clone() };
+        let job = batch::Job { recipe: self.settings.recipe.clone(), paper, ink, paint: self.paint.clone(), size: self.settings.size };
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(dirs))) = dirs.await else { return };
             let Some(dir) = dirs.into_iter().next() else { return };
@@ -1208,15 +1279,55 @@ impl Darkroom {
         .detach();
     }
 
-    fn export_png(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let (art, _) = self.current_art(cx);
-        match render::png(&art, self.settings.recipe.scale, self.settings.recipe.look()) {
-            Ok(bytes) => {
-                let name = format!("{}-{}-{}.png", self.stem(), self.settings.recipe.algo.key(), self.settings.recipe.palette);
-                self.save_as(name, bytes, "PNG", cx);
+    /// The size a still export comes out at, in pixels.
+    fn export_dims(&mut self, cx: &mut Context<Self>) -> (u32, u32) {
+        let (size, scale) = (self.settings.size, self.settings.recipe.scale);
+        match self.settings.recipe.mode {
+            Mode::Dither => {
+                let r = &self.settings.recipe;
+                size.dims(r.cols, studio::rows_for(self.photo.print(), r.cols), scale)
             }
-            Err(why) => self.toast(toast("Couldn't make the PNG").danger().message(why), cx),
+            Mode::Ascii => {
+                let (w, h) = self.typeset(cx).native();
+                size.dims(w, h, scale)
+            }
         }
+    }
+
+    /// The frame on show as a picture, in the export format and size. Made
+    /// in the background: an 8K PNG takes a moment.
+    fn export_still(&mut self, cx: &mut Context<Self>) {
+        if self.exporting {
+            return;
+        }
+        let (format, size, scale) = (self.settings.format, self.settings.size, self.settings.recipe.scale);
+        let (name, job): (String, ExportJob) = match self.settings.recipe.mode {
+            Mode::Dither => {
+                let art = (*self.current_art(cx).0).clone();
+                let r = &self.settings.recipe;
+                let look = r.look();
+                (format!("{}-{}-{}.{}", self.stem(), r.algo.key(), r.palette, format.ext()), Box::new(move || render::still(&art, size, scale, format, look)))
+            }
+            Mode::Ascii => {
+                let art = (*self.typeset(cx)).clone();
+                (format!("{}.{}", self.stem(), format.ext()), Box::new(move || art.image(size, scale, format)))
+            }
+        };
+        let label = format.name();
+        self.exporting = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let bytes = cx.background_executor().spawn(async move { job() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.exporting = false;
+                match bytes {
+                    Ok(bytes) => this.save_as(name, bytes, label, cx),
+                    Err(why) => this.toast(toast(format!("Couldn't make the {label}")).danger().message(why), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn export_text(&mut self, cx: &mut Context<Self>) {
@@ -1224,15 +1335,13 @@ impl Darkroom {
         self.save_as(format!("{}.txt", self.stem()), text.into_bytes(), "Text", cx);
     }
 
-    /// Text art out as ANSI, HTML, SVG or (braille and blocks) PNG.
+    /// Text art out as ANSI or HTML (pictures: [`Self::export_still`]).
     fn export_textart(&mut self, ext: &'static str, cx: &mut Context<Self>) {
         let art = self.typeset(cx);
         let stem = self.stem();
         let (bytes, what): (Result<Vec<u8>, String>, &'static str) = match ext {
             "ans" => (Ok(art.ansi().into_bytes()), "ANSI"),
-            "html" => (Ok(art.html(&stem).into_bytes()), "HTML"),
-            "svg" => (Ok(art.svg().into_bytes()), "SVG"),
-            _ => (art.png(self.settings.recipe.scale.min(4)), "PNG"),
+            _ => (Ok(art.html(&stem).into_bytes()), "HTML"),
         };
         match bytes {
             Ok(bytes) => self.save_as(format!("{stem}.{ext}"), bytes, what, cx),
@@ -1259,19 +1368,21 @@ impl Darkroom {
 
     fn preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let p = palette(cx);
-        let ink = hsla(if self.settings.recipe.accent_ink { p.accent } else { p.fg });
         // The room the print has: the window less the sidebar, chrome and padding.
         let view = window.viewport_size();
         let (room_w, room_h) = (f32::from(view.width) - SIDEBAR - 72., f32::from(view.height) - 200.);
+        let sf = window.scale_factor();
+        let room_h = if self.photo.frames() > 1 && self.view != View::Sheet { room_h - 44. } else { room_h };
+        let zoom = self.zoom;
+        // Past the room, the print scrolls.
+        let pan = move |dw: u32, dh: u32, child: gpui::AnyElement| pan::pan("print-pan", dw as f32 / sf, dh as f32 / sf, room_w, room_h, child).into_any_element();
         match self.settings.recipe.mode {
             Mode::Dither if self.view == View::Sheet => self.sheet_view(room_w, room_h, window, cx).into_any_element(),
             Mode::Dither => {
                 let (art, dev) = self.current_art(cx);
                 let (w, h) = (art.w, art.h);
                 // Whole device pixels per art pixel, so the preview is the export.
-                let sf = window.scale_factor();
-                let room_h = if self.photo.frames() > 1 { room_h - 44. } else { room_h };
-                let cell = ((room_w / w as f32).min(room_h / h as f32) * sf).floor().max(1.) as u32;
+                let cell = (zoom.scale(w, h, room_w, room_h, sf).floor() as u32).max(1);
                 let look = self.settings.recipe.look();
                 let after = self.tex.get(key_of(("after", dev, cell, look.bits())), || render::bgra(&art, cell, look));
                 let (dw, dh) = (w * cell, h * cell);
@@ -1281,7 +1392,7 @@ impl Darkroom {
                     let paint = self.paint.as_ref();
                     let key = key_of(("mask", self.roll, self.photo.frame, self.paint_rev, r.flat_lines(), Self::adjust_key(adjust), cell));
                     let image = self.tex.get(key, || studio::mask_bgra(print, r, adjust, paint, cell));
-                    return div()
+                    let easel = div()
                         .id("mask-easel")
                         .cursor_crosshair()
                         .on_mouse_down(
@@ -1294,57 +1405,32 @@ impl Darkroom {
                             }
                         }))
                         .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.last_dab = None))
-                        .child(texture_at(image, dw, dh, sf, self.print_at.clone()))
-                        .into_any_element();
+                        .child(texture_at(image, dw, dh, sf, self.print_at.clone()));
+                    return pan(dw, dh, easel.into_any_element());
                 }
                 if self.view == View::Compare {
                     let print = self.photo.print();
                     let before = self.tex.get(key_of(("before", self.roll, self.photo.frame, w, h, cell)), || render::before_bgra(print, w, h, cell));
-                    return compare(before, after, dw, dh, sf, self.split, hsla(p.accent)).into_any_element();
+                    return pan(dw, dh, compare(before, after, dw, dh, sf, self.split, hsla(p.accent)).into_any_element());
                 }
-                develop(("print", self.roll), self.roll, texture(after, dw, dh, sf)).into_any_element()
+                pan(dw, dh, develop(("print", self.roll), self.roll, texture(after, dw, dh, sf)).into_any_element())
             }
             Mode::Ascii => {
+                // Drawn as pixels from the display face's own glyphs, so the
+                // preview is the exported picture and can shrink to fit.
                 let art = self.typeset(cx);
-                let room_h = if self.photo.frames() > 1 { room_h - 44. } else { room_h };
-                if art.is_drawable() {
-                    // Braille and blocks: drawn as pixels, so no font can misalign them.
-                    let sf = window.scale_factor();
-                    let (cw, chh) = (art.cols as f32 * 8., art.rows as f32 * 16.);
-                    let scale = ((room_w / cw).min(room_h / chh) * sf).floor().max(1.) as u32;
-                    let key = key_of(("textart", self.typeset.as_ref().map(|t| t.0), scale));
-                    let image = self.tex.get(key, || {
-                        let (w, h, mut px) = art.raster(scale);
-                        for p in px.as_chunks_mut::<4>().0 {
-                            p.swap(0, 2);
-                        }
-                        (w, h, px)
-                    });
-                    let (dw, dh) = (art.cols as u32 * 8 * scale, art.rows as u32 * 16 * scale);
-                    return texture(image, dw, dh, sf).into_any_element();
-                }
-                let paper = Rgba { r: art.paper[0], g: art.paper[1], b: art.paper[2], a: 1. };
-                let rgba = |c: Rgb| Rgba { r: c[0], g: c[1], b: c[2], a: 1. };
-                let tinted = art.cells.iter().any(|c| c.fg.is_some() || c.bg.is_some());
-                div()
-                    .id("ascii-scroll")
-                    .max_w(px(room_w))
-                    .max_h(px(room_h))
-                    .overflow_scroll()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_none()
-                            .text_color(ink)
-                            .when(tinted, |el| el.bg(paper))
-                            .children((0..art.rows).map(|y| {
-                                div().flex().flex_row().display(Scale::X1, window).whitespace_nowrap().children(art.runs(y).into_iter().map(move |run| {
-                                    div().whitespace_nowrap().text_color(rgba(run.fg)).when_some(run.bg, |el, bg| el.bg(rgba(bg))).child(run.text)
-                                }))
-                            })),
-                    )
-                    .into_any_element()
+                let (nw, nh) = art.native();
+                let k = zoom.scale(nw, nh, room_w, room_h, sf);
+                let (dw, dh) = (((nw as f32 * k).round() as u32).max(1), ((nh as f32 * k).round() as u32).max(1));
+                let key = key_of(("textart", self.typeset.as_ref().map(|t| t.0), dw, dh));
+                let image = self.tex.get(key, || {
+                    let (w, h, mut px) = art.raster_sized(dw, dh);
+                    for p in px.as_chunks_mut::<4>().0 {
+                        p.swap(0, 2);
+                    }
+                    (w, h, px)
+                });
+                pan(dw, dh, texture(image, dw, dh, sf).into_any_element())
             }
         }
     }
@@ -1406,15 +1492,33 @@ impl Darkroom {
     /// The row over the print: which view, and that view's controls.
     fn view_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let views = [View::Print, View::Compare, View::Sheet, View::Mask];
-        let mut bar = div().flex().flex_row().items_center().gap_4().child(
-            segmented("view-seg")
-                .option("Print")
-                .option("Compare")
-                .option("Sheet")
-                .option("Mask")
-                .selected(views.iter().position(|v| *v == self.view).unwrap_or(0))
-                .on_select(cx.listener(move |this, i: &usize, _, cx| this.set_view(views[*i], cx))),
-        );
+        let dither = self.settings.recipe.mode == Mode::Dither;
+        let mut bar = div().flex().flex_row().items_center().gap_4().when(dither, |el| {
+            el.child(
+                segmented("view-seg")
+                    .option("Print")
+                    .option("Compare")
+                    .option("Sheet")
+                    .option("Mask")
+                    .selected(views.iter().position(|v| *v == self.view).unwrap_or(0))
+                    .on_select(cx.listener(move |this, i: &usize, _, cx| this.set_view(views[*i], cx))),
+            )
+        });
+        if !dither || self.view != View::Sheet {
+            bar = bar.child(
+                Zoom::ALL
+                    .iter()
+                    .fold(segmented("zoom-seg"), |seg, z| seg.option(z.name()))
+                    .selected(Zoom::ALL.iter().position(|z| *z == self.zoom).unwrap_or(0))
+                    .on_select(cx.listener(|this, i: &usize, _, cx| {
+                        this.zoom = Zoom::ALL[*i];
+                        cx.notify();
+                    })),
+            );
+        }
+        if !dither {
+            return bar;
+        }
         match self.view {
             View::Compare => {
                 bar = bar.child(
@@ -1754,10 +1858,117 @@ impl Darkroom {
             )
     }
 
-    fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Advice on the photo's size for the width chosen.
+    fn source_hint(&self) -> String {
+        let r = &self.settings.recipe;
+        let src = self.photo.print().w;
+        // The source pixels one row of the art samples.
+        let (need, what) = match r.mode {
+            Mode::Dither => (r.cols, "pixel"),
+            Mode::Ascii => match r.glyphs {
+                Glyphs::Characters => (r.ascii_cols * 8, "character's 8 samples"),
+                Glyphs::Braille | Glyphs::Quadrants => (r.ascii_cols * 2, "dot"),
+                _ => (r.ascii_cols, "character"),
+            },
+        };
+        let work = if self.photo.frames() > 1 { 480 } else { 960 };
+        if src < need.min(work) {
+            format!("The photo is {src} px wide; this width wants {} px (one per {what}), so it's upscaled and soft. Use a bigger photo or a narrower width.", need.min(work))
+        } else {
+            format!("Photo {src} px wide: enough. Best: {}+ px wide, a clear subject, good contrast. Export size doesn't depend on it.", need.min(work))
+        }
+    }
+
+    /// Format and size for pictures, and what size that comes out at.
+    fn export_controls(&self, (w, h): (u32, u32), cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let s = &self.settings;
+        // Size choices: the pixel size, the named sizes, then custom.
+        let custom = match s.size {
+            export::Size::Long(n) if !export::PRESETS.iter().any(|(_, e)| *e == n) => Some(n),
+            _ => None,
+        };
+        let selected = match s.size {
+            export::Size::Scale => 0,
+            export::Size::Long(n) => export::PRESETS.iter().position(|(_, e)| *e == n).map(|i| i + 1).unwrap_or(export::PRESETS.len() + 1),
+        };
+        let options = std::iter::once("Pixel size".to_string())
+            .chain(export::PRESETS.iter().map(|(name, edge)| format!("{name} ({edge} px)")))
+            .chain(std::iter::once("Custom".to_string()));
+        let big = (w as u64 * h as u64) > 20_000_000;
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                field("export-format", "Format").hint(s.format.hint()).stacked().child(
+                    select("format-select")
+                        .options(export::Format::ALL.iter().map(|f| f.name()))
+                        .selected(export::Format::ALL.iter().position(|f| *f == s.format))
+                        .width(px(220.))
+                        .on_change(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.format = export::Format::ALL[*i], window, cx))),
+                ),
+            )
+            .child(
+                field("export-size", "Size").hint("The long edge; animations use it too").stacked().child(
+                    select("size-select")
+                        .options(options)
+                        .selected(Some(selected))
+                        .width(px(220.))
+                        .on_change(cx.listener(|this, i: &usize, window, cx| {
+                            let size = match *i {
+                                0 => export::Size::Scale,
+                                i if i <= export::PRESETS.len() => export::Size::Long(export::PRESETS[i - 1].1),
+                                // Custom starts from the size it makes now (off the
+                                // named sizes, so it reads as custom).
+                                _ => {
+                                    let (w, h) = this.export_dims(cx);
+                                    let n = w.max(h).clamp(16, export::MAX_EDGE - 1);
+                                    export::Size::Long(if export::PRESETS.iter().any(|(_, e)| *e == n) { n + 1 } else { n })
+                                }
+                            };
+                            this.change(|s| s.size = size, window, cx)
+                        })),
+                ),
+            )
+            .when(s.size == export::Size::Scale, |el| {
+                el.child(field("scale", "Pixel size").hint("Screen pixels per art pixel (text art: per glyph pixel)").stacked().child(
+                    SCALES.iter().fold(segmented("scale-seg"), |seg, x| seg.option(format!("{x}x")))
+                        .selected(SCALES.iter().position(|x| *x == s.recipe.scale).unwrap_or(2))
+                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.scale = SCALES[*i], window, cx))),
+                ))
+            })
+            .when_some(custom, |el, n| {
+                el.child(field("custom-size", "Long edge").stacked().child(
+                    number_input("custom-size-input")
+                        .value(n as f64)
+                        .range(16., export::MAX_EDGE as f64)
+                        .step(64.)
+                        .digits(4)
+                        .decimals(0)
+                        .suffix("px")
+                        .on_change(cx.listener(|this, v: &f64, window, cx| this.change(|s| s.size = export::Size::Long((*v as u32).clamp(16, export::MAX_EDGE)), window, cx))),
+                ))
+            })
+            .child(
+                div()
+                    .body(text::SM)
+                    .text_color(hsla(if big { p.warning } else { p.fg_dim }))
+                    .child(if s.format == export::Format::Svg {
+                        format!("{w} × {h} px, vector")
+                    } else if big {
+                        format!("{w} × {h} px: big, takes a few seconds")
+                    } else {
+                        format!("{w} × {h} px")
+                    }),
+            )
+    }
+
+    fn sidebar(&self, export_dims: (u32, u32), window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let s = &self.settings;
         let mode = s.recipe.mode;
+        let source_hint = self.source_hint();
 
         let process = match mode {
             Mode::Dither => div()
@@ -1828,7 +2039,7 @@ impl Darkroom {
                             .on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.serpentine = *on, window, cx))),
                     )
                 })
-                .child(field("cols", "Width").stacked().child(
+                .child(field("cols", "Width").hint(source_hint.clone()).stacked().child(
                     slider("cols-slider")
                         .range(32., 480.)
                         .step(8.)
@@ -1836,11 +2047,6 @@ impl Darkroom {
                         .width(px(220.))
                         .format(|v| format!("{v:.0} px").into())
                         .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.cols = *v as u32, window, cx))),
-                ))
-                .child(field("scale", "PNG pixel size").stacked().child(
-                    SCALES.iter().fold(segmented("scale-seg"), |seg, x| seg.option(format!("{x}x")))
-                        .selected(SCALES.iter().position(|x| *x == s.recipe.scale).unwrap_or(2))
-                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.scale = SCALES[*i], window, cx))),
                 )),
             Mode::Ascii => div()
                 .flex()
@@ -1898,7 +2104,7 @@ impl Darkroom {
                         .selected(if s.recipe.fit == Fit::Tone { 1 } else { 0 })
                         .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.fit = if *i == 1 { Fit::Tone } else { Fit::Shape }, window, cx))),
                 )))
-                .child(field("ascii-cols", "Width").stacked().child(
+                .child(field("ascii-cols", "Width").hint(source_hint.clone()).stacked().child(
                     slider("ascii-cols-slider")
                         .range(20., 200.)
                         .step(4.)
@@ -1929,15 +2135,15 @@ impl Darkroom {
                         |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Mp4, cx),
                     )))
                 })
-                .child(Button::new("export-frame").label("Export this frame").icon(Icon::File).ghost().full_width().on_click(cx.listener(
-                    |this, _: &ClickEvent, window, cx| this.export_png(window, cx),
+                .child(Button::new("export-frame").label(format!("Export this frame as {}", s.format.name())).icon(Icon::File).ghost().full_width().loading(self.exporting).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| this.export_still(cx),
                 ))),
             Mode::Dither => div()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(Button::new("export-png").label("Export PNG").icon(Icon::File).primary().full_width().shortcut("Ctrl+E").on_click(cx.listener(
-                    |this, _: &ClickEvent, window, cx| this.export_png(window, cx),
+                .child(Button::new("export-still").label(format!("Export {}", s.format.name())).icon(Icon::File).primary().full_width().shortcut("Ctrl+E").loading(self.exporting).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| this.export_still(cx),
                 ))),
             Mode::Ascii => div()
                 .flex()
@@ -1948,7 +2154,10 @@ impl Darkroom {
                         cx.listener(|this, _: &ClickEvent, _, cx| this.export_film(cx)),
                     ))
                 })
-                .child(Button::new("export-text").label("Export text").icon(Icon::File).primary().full_width().shortcut("Ctrl+Shift+E").on_click(
+                .child(Button::new("export-still").label(format!("Export {}", s.format.name())).icon(Icon::File).primary().full_width().shortcut("Ctrl+E").loading(self.exporting).on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| this.export_still(cx),
+                )))
+                .child(Button::new("export-text").label("Export text").icon(Icon::File).secondary().full_width().shortcut("Ctrl+Shift+E").on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.export_text(cx)),
                 ))
                 .child(
@@ -1959,10 +2168,7 @@ impl Darkroom {
                         .gap_2()
                         .child(Button::new("export-ans").label("ANSI").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("ans", cx))))
                         .child(Button::new("export-html").label("HTML").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("html", cx))))
-                        .child(Button::new("export-svg").label("SVG").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("svg", cx))))
-                        .when(s.recipe.glyphs != Glyphs::Characters, |el| {
-                            el.child(Button::new("export-tpng").label("PNG").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("png", cx))))
-                        }),
+                        ,
                 )
                 .child(Button::new("copy-text").label("Copy").icon(Icon::Copy).secondary().full_width().shortcut("Ctrl+Shift+C").on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.copy_text(cx)),
@@ -2054,6 +2260,7 @@ impl Darkroom {
                             .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.accent_ink = *i == 1, window, cx))),
                     ))
                     .child(rule(Some("export"), window, cx))
+                    .child(self.export_controls(export_dims, cx))
                     .child(exports)
                     .child(Button::new("save-recipe").label("Save recipe").icon(Icon::File).secondary().full_width().shortcut("Ctrl+S").on_click(
                         cx.listener(|this, _: &ClickEvent, _, cx| this.save_recipe(cx)),
@@ -2074,7 +2281,7 @@ impl Render for Darkroom {
         self.tex.begin();
         let preview = self.preview(window, cx);
         self.tex.end(window);
-        let view_bar = (self.settings.recipe.mode == Mode::Dither).then(|| self.view_bar(cx));
+        let view_bar = Some(self.view_bar(cx));
         let timeline = (self.photo.frames() > 1 && self.view != View::Sheet).then(|| self.timeline(cx));
         let drop_hint = hsla(p.raised);
         let print = panel("Print").meta(size_meta).flex_1().min_w_0().min_h_0().children(view_bar.map(|bar| div().px_2().pb_2().child(bar))).child(
@@ -2102,7 +2309,8 @@ impl Render for Darkroom {
         .children(timeline.map(|t| div().px_2().pt_2().child(t)));
 
         let open = Button::new("open").label("Open").icon(Icon::Folder).ghost().small().shortcut("Ctrl+O").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open(cx)));
-        let sidebar = self.sidebar(window, cx);
+        let export_dims = self.export_dims(cx);
+        let sidebar = self.sidebar(export_dims, window, cx);
 
         window_frame().child(power_on_in(
             "power",
@@ -2119,11 +2327,11 @@ impl Render for Darkroom {
                 .on_action(cx.listener(|this, _: &SaveRecipe, _, cx| this.save_recipe(cx)))
                 .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
                 .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
-                .on_action(cx.listener(|this, _: &ExportPng, window, cx| {
+                .on_action(cx.listener(|this, _: &ExportPng, _, cx| {
                     if this.photo.frames() > 1 && this.settings.recipe.mode == Mode::Dither {
                         this.export_anim(AnimOut::Gif, cx)
                     } else {
-                        this.export_png(window, cx)
+                        this.export_still(cx)
                     }
                 }))
                 .on_action(cx.listener(|this, _: &PlayPause, _, cx| this.toggle_play(cx)))

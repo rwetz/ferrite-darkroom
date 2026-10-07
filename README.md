@@ -72,8 +72,9 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   and *colour half blocks*, two palette-coloured pixels per character.
   Colour each cell with the ink, the photo's own colours or the palette.
   Export plain text, ANSI (24-bit colour, `cat` it in a terminal), HTML,
-  SVG, or for braille and blocks a PNG; an animation exports as an *ASCII
-  film*, an HTML page that plays itself.
+  or a picture in any export format (characters drawn from the display
+  face's own pixels); an animation exports as an *ASCII film*, an HTML page
+  that plays itself.
 - **Tone.** Brightness, contrast, gamma and invert.
 - **Palette.** *Scheme* inks the art in the scheme's text or accent colour
   on its background (light appearance gives dark ink on light paper). Or
@@ -117,10 +118,21 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   one ink on clean paper), Lattice (a solid figure on a grid of dots),
   Dots, Newsprint, CMYK print, Engraving, Game Boy, Sunset and Braille.
   Their files are in `recipes/`.
-- **Export.** A PNG in the palette's exact colours at 1×, 2×, 4× or 8× pixel size
-  (<kbd>Ctrl</kbd>+<kbd>E</kbd>), the ASCII as a text file
+- **Export.** A picture in the palette's exact colours as PNG, JPEG, WebP,
+  BMP, TIFF or SVG (vector, one path per colour)
+  (<kbd>Ctrl</kbd>+<kbd>E</kbd>), sized by pixel size (1×, 2×, 4×, 8×) or by
+  long edge: HD, Full HD, QHD, 4K, 5K, 8K, or any width up to 8192 px.
+  Animations take the same size. The ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the
   clipboard (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>).
+- **A print bigger than the window** scrolls, with scrollbars both ways.
+  The zoom over the print picks *Fit* (all of it in view, shrunk if it has
+  to be), or *1x*, *2x*, *4x* whole pixels.
+- **What photo to use.** Anything about 1000 px wide or more is plenty: a
+  still is worked at up to 960 px wide (an animation at 480), so a bigger
+  file adds nothing, and the export size doesn't depend on it. A clear
+  subject and good contrast matter far more than pixels. The Width hint
+  says when a photo is too small for the width chosen.
 - **Batch and command line.** *Batch develop a folder* (command palette)
   runs the current recipe over every picture in a folder, into a `darkroom`
   folder beside them. Or skip the window entirely:
@@ -133,8 +145,9 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 
   A painted mask goes along with `--mask mask.png`. The output's
   extension picks the format: `.png` (an APNG for an animation), `.gif`,
-  or text art as `.txt`, `.ans`, `.svg` or `.html` (an ASCII film for an
-  animation). Without `--recipe` it uses the
+  a still `.jpg`, `.webp`, `.bmp` or `.tif`, or text art as `.txt`, `.ans`, `.svg` or `.html` (an ASCII film for an
+  animation). `--size 8k` (or `4k`, `1080p`, `3000`, …) sets how big
+  pictures come out. Without `--recipe` it uses the
   app's last recipe; `--help` lists the rest.
 - **Ferrite throughout.** Ten color schemes, a command palette
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with every algorithm,

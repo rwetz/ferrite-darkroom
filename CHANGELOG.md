@@ -4,6 +4,27 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-10-07
+
+### Added
+
+- Export pictures as PNG, JPEG, WebP, BMP, TIFF or SVG. The SVG of a dither
+  is vector (one path per colour, cell shapes included), sharp at any size.
+- Export size by long edge: HD, Full HD, QHD, 4K, 5K, 8K, or any width up to
+  8192 px, besides the pixel size. GIF, APNG, MP4 and sprite sheets use it
+  too. On the command line: `--size 8k`, and `.jpg` `.webp` `.bmp` `.tif`
+  outputs.
+- Character ASCII exports as a picture too, drawn from the display face's
+  own 8×16 glyphs.
+- A zoom over the print (Fit, 1x, 2x, 4x), and scrollbars both ways when the
+  print is bigger than the window.
+- The Width hint advises on the photo's size: whether it's big enough for
+  the width chosen.
+
+### Changed
+
+- The ASCII preview is drawn as pixels, the same as the exported picture.
+
 ## [1.0.0] - 2026-10-07
 
 Darkroom grows from a three-pattern dither toy into a dither and text-art
@@ -161,6 +182,7 @@ The first release.
 - The shared look from Lodestone (`FERRITE_*`) when launched from it.
 - The pixel-art logo as the Windows executable, window and taskbar icon.
 
+[1.1.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.0.0
 [0.1.1]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v0.1.0

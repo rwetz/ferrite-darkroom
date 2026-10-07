@@ -23,6 +23,7 @@ use image::AnimationDecoder;
 use crate::engine::Rgb;
 use crate::mask::Paint;
 use crate::recipe::Recipe;
+use crate::export::{Format, Size};
 use crate::render::{self, Look};
 use crate::studio::{self, Adjust, Art, Print};
 
@@ -148,11 +149,17 @@ pub fn delays(frames: &[Frame], speed: f32) -> Vec<u32> {
     frames.iter().map(|f| ((f.delay_ms as f32 / speed.max(0.05)).round() as u32).max(10)).collect()
 }
 
+/// One frame's pixels at the export size.
+fn draw(art: &Art, size: Size, scale: u32, look: Look) -> (u32, u32, Vec<u8>) {
+    let (w, h) = size.dims(art.w, art.h, scale);
+    render::rgba_sized(art, w, h, look)
+}
+
 /// An animated GIF in exactly the art's colours (plus a transparent slot
 /// for transparent paper), looping forever.
-pub fn gif(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u8>, String> {
+pub fn gif(arts: &[Art], delays: &[u32], size: Size, scale: u32, look: Look) -> Result<Vec<u8>, String> {
     let first = arts.first().ok_or("nothing to export")?;
-    let (w, h, _) = render::rgba(first, scale, look);
+    let (w, h, _) = draw(first, size, scale, look);
     if w > u16::MAX as u32 || h > u16::MAX as u32 {
         return Err("too big for a GIF; use a smaller pixel size".into());
     }
@@ -172,7 +179,7 @@ pub fn gif(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u
         let mut enc = gif::Encoder::new(&mut out, w as u16, h as u16, &global).map_err(|e| e.to_string())?;
         enc.set_repeat(gif::Repeat::Infinite).map_err(|e| e.to_string())?;
         for (art, &delay) in arts.iter().zip(delays) {
-            let (_, _, px) = render::rgba(art, scale, look);
+            let (_, _, px) = draw(art, size, scale, look);
             let index: Vec<u8> = px
                 .as_chunks::<4>()
                 .0
@@ -193,9 +200,9 @@ pub fn gif(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u
 }
 
 /// An animated PNG: full colour and alpha, any palette size.
-pub fn apng(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u8>, String> {
+pub fn apng(arts: &[Art], delays: &[u32], size: Size, scale: u32, look: Look) -> Result<Vec<u8>, String> {
     let first = arts.first().ok_or("nothing to export")?;
-    let (w, h, _) = render::rgba(first, scale, look);
+    let (w, h, _) = draw(first, size, scale, look);
     let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, w, h);
@@ -205,7 +212,7 @@ pub fn apng(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<
         let mut writer = enc.write_header().map_err(|e| e.to_string())?;
         for (art, &delay) in arts.iter().zip(delays) {
             writer.set_frame_delay(delay.min(u16::MAX as u32) as u16, 1000).map_err(|e| e.to_string())?;
-            let (_, _, px) = render::rgba(art, scale, look);
+            let (_, _, px) = draw(art, size, scale, look);
             writer.write_image_data(&px).map_err(|e| e.to_string())?;
         }
         writer.finish().map_err(|e| e.to_string())?;
@@ -285,7 +292,7 @@ fn load_video(path: &Path) -> Result<Clip, String> {
 
 /// An MP4 (H.264) through ffmpeg, at the average frame rate, pixels kept
 /// sharp (nearest-neighbour) and padded to even sizes as H.264 needs.
-pub fn mp4(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u8>, String> {
+pub fn mp4(arts: &[Art], delays: &[u32], size: Size, scale: u32, look: Look) -> Result<Vec<u8>, String> {
     if arts.is_empty() {
         return Err("nothing to export".into());
     }
@@ -304,7 +311,7 @@ pub fn mp4(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u
     {
         let stdin = child.stdin.as_mut().ok_or("couldn't talk to ffmpeg")?;
         for art in arts {
-            let png = render::png(art, scale, look)?;
+            let png = render::still(art, size, scale, Format::Png, look)?;
             stdin.write_all(&png).map_err(|e| format!("ffmpeg stopped reading: {e}"))?;
         }
     }
@@ -319,14 +326,14 @@ pub fn mp4(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u
 }
 
 /// Every frame on one PNG, left to right then down, as near square as fits.
-pub fn sprite_sheet(arts: &[Art], scale: u32, look: Look) -> Result<Vec<u8>, String> {
+pub fn sprite_sheet(arts: &[Art], size: Size, scale: u32, look: Look) -> Result<Vec<u8>, String> {
     let first = arts.first().ok_or("nothing to export")?;
-    let (fw, fh, _) = render::rgba(first, scale, look);
+    let (fw, fh, _) = draw(first, size, scale, look);
     let per_row = (arts.len() as f32).sqrt().ceil() as u32;
     let rows = (arts.len() as u32).div_ceil(per_row);
     let mut sheet = image::RgbaImage::new(fw * per_row, fh * rows);
     for (i, art) in arts.iter().enumerate() {
-        let (_, _, px) = render::rgba(art, scale, look);
+        let (_, _, px) = draw(art, size, scale, look);
         let tile = image::RgbaImage::from_raw(fw, fh, px).ok_or("frame size mismatch")?;
         let (x, y) = ((i as u32 % per_row) * fw, (i as u32 / per_row) * fh);
         image::imageops::replace(&mut sheet, &tile, x as i64, y as i64);
@@ -402,7 +409,7 @@ mod tests {
     fn gif_round_trips_frames_and_colours() {
         let frames = moving(3);
         let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
-        let bytes = gif(&arts, &delays(&frames, 1.), 2, Look::default()).unwrap();
+        let bytes = gif(&arts, &delays(&frames, 1.), Size::Scale, 2, Look::default()).unwrap();
         let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
         let out = decoder.into_frames().collect_frames().unwrap();
         assert_eq!(out.len(), 3);
@@ -419,7 +426,7 @@ mod tests {
         let frames = moving(2);
         let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
         let look = Look { transparent: true, ..Look::default() };
-        let bytes = gif(&arts, &delays(&frames, 1.), 1, look).unwrap();
+        let bytes = gif(&arts, &delays(&frames, 1.), Size::Scale, 1, look).unwrap();
         let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
         let out = decoder.into_frames().collect_frames().unwrap();
         assert!(out[0].buffer().pixels().any(|p| p.0[3] == 0));
@@ -429,7 +436,7 @@ mod tests {
     fn apng_round_trips() {
         let frames = moving(3);
         let arts = develop_all(&frames, &recipe(Algo::Atkinson, 0.5), Adjust::default(), &BW, None);
-        let bytes = apng(&arts, &delays(&frames, 2.), 1, Look::default()).unwrap();
+        let bytes = apng(&arts, &delays(&frames, 2.), Size::Scale, 1, Look::default()).unwrap();
         let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(bytes)).unwrap();
         assert!(decoder.is_apng().unwrap());
         let out = decoder.apng().unwrap().into_frames().collect_frames().unwrap();
@@ -441,7 +448,7 @@ mod tests {
     fn sprite_sheet_is_a_grid() {
         let frames = moving(5);
         let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
-        let img = image::load_from_memory(&sprite_sheet(&arts, 1, Look::default()).unwrap()).unwrap();
+        let img = image::load_from_memory(&sprite_sheet(&arts, Size::Scale, 1, Look::default()).unwrap()).unwrap();
         // Five frames: three to a row, two rows.
         assert_eq!((img.width(), img.height()), (96, 32));
     }
@@ -453,7 +460,7 @@ mod tests {
             .map(|k| Frame { print: Print::from_rgb(600, 20, vec![[k as f32; 3]; 600 * 20]), delay_ms: 120 })
             .collect();
         let arts: Vec<Art> = frames.iter().map(|f| studio::develop(&f.print, 600, Adjust::default(), BW.to_vec(), params(Algo::Threshold))).collect();
-        let bytes = gif(&arts, &delays(&frames, 1.), 1, Look::default()).unwrap();
+        let bytes = gif(&arts, &delays(&frames, 1.), Size::Scale, 1, Look::default()).unwrap();
         let path = std::env::temp_dir().join(format!("darkroom-test-{}.gif", std::process::id()));
         std::fs::write(&path, bytes).unwrap();
         let clip = load(&path).unwrap();
@@ -482,7 +489,7 @@ mod tests {
         }
         let frames = moving(6);
         let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
-        let bytes = mp4(&arts, &delays(&frames, 1.), 4, Look::default()).unwrap();
+        let bytes = mp4(&arts, &delays(&frames, 1.), Size::Scale, 4, Look::default()).unwrap();
         assert!(bytes.len() > 100 && &bytes[4..8] == b"ftyp", "not an MP4");
         let path = std::env::temp_dir().join(format!("darkroom-test-{}.mp4", std::process::id()));
         std::fs::write(&path, bytes).unwrap();

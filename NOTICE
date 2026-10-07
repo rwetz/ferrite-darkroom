@@ -17,5 +17,8 @@ covered by the Apache License above; each keeps its own license.
     https://github.com/JetBrains/JetBrainsMono
     Licensed under the SIL Open Font License, Version 1.1.
 
+src/glyphs.rs holds 8x16 bitmaps rendered from PxPlus IBM VGA 8x16 (copied
+from ferrite-design) and so is under CC BY-SA 4.0 like the font.
+
 The license texts ship with ferrite-design in assets/fonts/ and are
 included in every Darkroom release archive.

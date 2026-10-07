@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::engine::{Rgb, oklab};
+use crate::export::{Format, Size};
 use crate::recipe::Recipe;
 use crate::studio::{self, Adjust};
 use crate::{render, sequence, textart};
@@ -18,6 +19,8 @@ pub struct Job {
     pub ink: Rgb,
     /// A painted mask, for recipes with `mask = "painted"`.
     pub paint: Option<crate::mask::Paint>,
+    /// How big pictures come out.
+    pub size: Size,
 }
 
 /// A folder batch's result: the files written, and the inputs that failed
@@ -35,7 +38,7 @@ impl Job {
         let p = scheme.palette(if light { Tone::Light } else { Tone::Dark });
         let rgb = |hex: u32| [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff].map(|c| c as f32 / 255.);
         let ink = if recipe.accent_ink { p.accent } else { p.fg };
-        Job { recipe, paper: rgb(p.bg), ink: rgb(ink), paint: None }
+        Job { recipe, paper: rgb(p.bg), ink: rgb(ink), paint: None, size: Size::Scale }
     }
 
     fn adjust(&self) -> Adjust {
@@ -45,7 +48,8 @@ impl Job {
     }
 
     /// Develop `input` into `output`. `.gif` makes a GIF (a still makes a
-    /// one-frame GIF), `.png` a PNG (an APNG for an animation); `.txt`,
+    /// one-frame GIF), `.png` a PNG (an APNG for an animation), `.jpg`,
+    /// `.webp`, `.bmp` and `.tif` a still of the first frame; `.txt`,
     /// `.ans`, `.html` and `.svg` make text art of the first frame (an
     /// animation's `.html` is a film that plays every frame).
     pub fn develop_file(&self, input: &Path, output: &Path) -> Result<(), String> {
@@ -54,15 +58,26 @@ impl Job {
         let r = &self.recipe;
         let adjust = self.adjust();
         let colors = r.palette_colors(self.paper, self.ink);
+        let size = self.size;
         let bytes = match ext.as_str() {
+            "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" => {
+                let format = Format::from_key(&ext).unwrap_or_default();
+                match r.mode {
+                    crate::recipe::Mode::Ascii => textart::make(&clip.frames[0].print, r, adjust, &colors, self.paper, self.ink).image(size, r.scale, format)?,
+                    crate::recipe::Mode::Dither => {
+                        let art = sequence::develop_all(&clip.frames[..1], r, adjust, &colors, self.paint.as_ref()).remove(0);
+                        render::still(&art, size, r.scale, format, r.look())?
+                    }
+                }
+            }
             "gif" | "png" | "apng" | "mp4" => {
                 let arts = sequence::develop_all(&clip.frames, r, adjust, &colors, self.paint.as_ref());
                 let delays = sequence::delays(&clip.frames, r.speed);
                 match ext.as_str() {
-                    "gif" => sequence::gif(&arts, &delays, r.scale, r.look())?,
-                    "mp4" => sequence::mp4(&arts, &delays, r.scale, r.look())?,
-                    _ if clip.is_animated() => sequence::apng(&arts, &delays, r.scale, r.look())?,
-                    _ => render::png(&arts[0], r.scale, r.look())?,
+                    "gif" => sequence::gif(&arts, &delays, size, r.scale, r.look())?,
+                    "mp4" => sequence::mp4(&arts, &delays, size, r.scale, r.look())?,
+                    _ if clip.is_animated() => sequence::apng(&arts, &delays, size, r.scale, r.look())?,
+                    _ => render::still(&arts[0], size, r.scale, Format::Png, r.look())?,
                 }
             }
             "txt" | "ans" | "html" | "svg" => {
@@ -82,8 +97,8 @@ impl Job {
                 }
                 .into_bytes()
             }
-            "" => return Err(format!("{} has no extension; use .png, .gif, .mp4, .txt, .ans, .html or .svg", output.display())),
-            other => return Err(format!(".{other} isn't an output Darkroom makes; use .png, .gif, .mp4, .txt, .ans, .html or .svg")),
+            "" => return Err(format!("{} has no extension; use .png, .jpg, .webp, .bmp, .tif, .gif, .mp4, .txt, .ans, .html or .svg", output.display())),
+            other => return Err(format!(".{other} isn't an output Darkroom makes; use .png, .jpg, .webp, .bmp, .tif, .gif, .mp4, .txt, .ans, .html or .svg")),
         };
         if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -151,7 +166,14 @@ mod tests {
         ascii.develop_file(&input, &dir.join("out.txt")).unwrap();
         let text = std::fs::read_to_string(dir.join("out.txt")).unwrap();
         assert!(text.lines().count() > 3);
-        assert!(job_err(&input, &dir.join("out.jpg")).contains(".jpg"));
+        assert!(job_err(&input, &dir.join("out.psd")).contains(".psd"));
+        // Stills in other formats, at a size.
+        let big = Job { size: Size::Long(1920), ..super::tests::job() };
+        for ext in ["jpg", "webp", "bmp", "tif"] {
+            big.develop_file(&input, &dir.join(format!("out.{ext}"))).unwrap();
+            let img = image::open(dir.join(format!("out.{ext}"))).unwrap();
+            assert_eq!(img.width(), 1920, "{ext}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
