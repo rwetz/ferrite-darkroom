@@ -889,7 +889,7 @@ impl Darkroom {
             return d.art.clone();
         }
         let params = s.recipe.params();
-        let art = Rc::new(studio::develop(&self.photo.print(), s.recipe.cols, a, colors, params));
+        let art = Rc::new(studio::develop(self.photo.print(), s.recipe.cols, a, colors, params));
         self.developed = Some(Developed { key, art: art.clone() });
         art
     }
@@ -914,7 +914,7 @@ impl Darkroom {
         {
             return tiles.clone();
         }
-        let print = &self.photo.print();
+        let print = self.photo.print();
         let tiles: Vec<Tile> = match self.sheet {
             SheetKind::Algorithms => Algo::ALL
                 .iter()
@@ -942,7 +942,7 @@ impl Darkroom {
         match &self.typeset {
             Some((k, lines)) if *k == key => lines.clone(),
             _ => {
-                let lines = studio::ascii_lines(&self.photo.print(), key.0, a, s.recipe.charset, s.recipe.fit);
+                let lines = studio::ascii_lines(self.photo.print(), key.0, a, s.recipe.charset, s.recipe.fit);
                 self.typeset = Some((key, lines.clone()));
                 lines
             }
@@ -1024,7 +1024,7 @@ impl Darkroom {
                 let after = self.tex.get(key_of(("after", dev, cell, look.bits())), || render::bgra(&art, cell, look));
                 let (dw, dh) = (w * cell, h * cell);
                 if self.view == View::Compare {
-                    let print = &self.photo.print();
+                    let print = self.photo.print();
                     let before = self.tex.get(key_of(("before", self.roll, self.photo.frame, w, h, cell)), || render::before_bgra(print, w, h, cell));
                     return compare(before, after, dw, dh, sf, self.split, hsla(p.accent)).into_any_element();
                 }
@@ -1527,7 +1527,7 @@ impl Render for Darkroom {
         let p = palette(cx);
         let (w, h) = (self.photo.print().w, self.photo.print().h);
         let size_meta = match self.settings.recipe.mode {
-            Mode::Dither => format!("{} · {}×{} px", self.photo.name, self.settings.recipe.cols, studio::rows_for(&self.photo.print(), self.settings.recipe.cols)),
+            Mode::Dither => format!("{} · {}×{} px", self.photo.name, self.settings.recipe.cols, studio::rows_for(self.photo.print(), self.settings.recipe.cols)),
             Mode::Ascii => format!("{} · {} ch", self.photo.name, self.settings.recipe.ascii_cols),
         };
         self.tex.begin();
