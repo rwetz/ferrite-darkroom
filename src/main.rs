@@ -7,9 +7,12 @@
 //!
 //!     cargo run
 //!     cargo run -- photo.jpg
+//!     cargo run -- photo.jpg -o print.png --recipe recipes/gameboy.toml   (no window; see cli.rs)
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod batch;
+mod cli;
 mod engine;
 mod palettes;
 mod recipe;
@@ -381,6 +384,7 @@ impl Darkroom {
             command("Open recipe…").group("Recipe").icon(Icon::Folder).shortcut("Ctrl+Shift+O").on_run(run(|this, _, cx| this.open_recipe(cx))),
             command("Save recipe…").group("Recipe").icon(Icon::File).shortcut("Ctrl+S").on_run(run(|this, _, cx| this.save_recipe(cx))),
             command("Import palette…").group("Recipe").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_palette(cx))),
+            command("Batch develop a folder…").group("File").icon(Icon::Folder).on_run(run(|this, _, cx| this.batch(cx))),
             command("Paste palette").group("Recipe").icon(Icon::Copy).on_run(run(|this, _, cx| this.paste_palette(cx))),
             command("New random seed").group("Develop").icon(Icon::Refresh).on_run(run(|this, _, cx| this.reseed(cx))),
             command("Undo").group("Edit").shortcut("Ctrl+Z").on_run(run(|this, _, cx| this.undo(cx))),
@@ -822,7 +826,7 @@ impl Darkroom {
     /// The custom palette, when it's chosen and has its colours.
     fn custom(&self) -> Option<&[Rgb]> {
         let r = &self.settings.recipe;
-        (r.palette == palettes::CUSTOM && r.colors.len() >= 2).then_some(r.colors.as_slice())
+        r.uses_custom().then_some(r.colors.as_slice())
     }
 
     fn palette_name(&self) -> &'static str {
@@ -830,11 +834,35 @@ impl Darkroom {
     }
 
     fn palette_colors(&self, cx: &App) -> Vec<Rgb> {
-        if let Some(colors) = self.custom() {
-            return colors.to_vec();
-        }
         let (paper, ink) = self.scheme_inks(cx);
-        self.preset().colors(paper, ink)
+        self.settings.recipe.palette_colors(paper, ink)
+    }
+
+    /// Develop every picture in a folder with the current recipe, into a
+    /// `darkroom` folder beside them.
+    fn batch(&mut self, cx: &mut Context<Self>) {
+        let dirs = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Develop folder".into()) });
+        let (paper, ink) = self.scheme_inks(cx);
+        let job = batch::Job { recipe: self.settings.recipe.clone(), paper, ink };
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(dirs))) = dirs.await else { return };
+            let Some(dir) = dirs.into_iter().next() else { return };
+            let out = dir.join("darkroom");
+            let _ = this.update(cx, |this, cx| this.toast(toast("Developing the folder…").message(dir.display().to_string()), cx));
+            let target = out.clone();
+            let result = cx.background_executor().spawn(async move { job.develop_folder(&dir, &target) }).await;
+            let _ = this.update(cx, |this, cx| {
+                let t = match result {
+                    Ok((done, failed)) if failed.is_empty() => toast(format!("{} developed", done.len())).success().message(out.display().to_string()),
+                    Ok((done, failed)) => toast(format!("{} developed, {} failed", done.len(), failed.len()))
+                        .warning()
+                        .message(failed.iter().map(|(p, why)| format!("{}: {why}", p.file_name().unwrap_or_default().to_string_lossy())).collect::<Vec<_>>().join("\n")),
+                    Err(why) => toast("Couldn't develop the folder").danger().message(why),
+                };
+                this.toast(t, cx);
+            });
+        })
+        .detach();
     }
 
     /// The dither, developed again only when something changed.
@@ -1585,6 +1613,10 @@ impl Render for Darkroom {
 gpui::actions!(darkroom, [Open, OpenRecipe, SaveRecipe, ExportPng, ExportText, CopyText, Invert, Undo, Redo, PlayPause, NextFrame, PrevFrame]);
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli::run(&args) {
+        std::process::exit(code);
+    }
     gpui_platform::application().run(|cx: &mut App| {
         ferrite_design::init(Appearance::Dark, cx);
         cx.bind_keys([

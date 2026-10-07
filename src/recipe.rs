@@ -335,6 +335,20 @@ impl Recipe {
         Look { shape: self.shape, gutter: self.gutter, modulate: self.modulate, paper: self.paper, transparent: self.transparent, lattice: self.lattice }
     }
 
+    /// Whether the custom palette is chosen and has its colours.
+    pub fn uses_custom(&self) -> bool {
+        self.palette == palettes::CUSTOM && self.colors.len() >= 2
+    }
+
+    /// The colours the art develops in. `paper` and `ink` are the scheme's,
+    /// for the Scheme palette.
+    pub fn palette_colors(&self, paper: Rgb, ink: Rgb) -> Vec<Rgb> {
+        if self.uses_custom() {
+            return self.colors.clone();
+        }
+        palettes::by_key(&self.palette).unwrap_or(&palettes::PRESETS[0]).colors(paper, ink)
+    }
+
     pub fn params(&self) -> Params {
         Params { algo: self.algo, strength: self.strength, bias: self.bias, serpentine: self.serpentine, space: self.space, seed: self.seed }
     }

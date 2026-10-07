@@ -6,7 +6,26 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
-The 0.3 milestone in [the roadmap](docs/ROADMAP.md): render and compare.
+The 0.4 milestone in [the roadmap](docs/ROADMAP.md): animation, batch and
+the command line.
+
+### Added
+
+- Animated GIF, APNG and WebP in: decoded a frame at a time, shrunk as they
+  arrive, played in the print at their own timing.
+- A timeline: play/pause (Space), a frame scrubber, step with `,` and `.`.
+- Temporal stability, inside error diffusion: still areas stop shimmering,
+  and nothing a moving object leaves behind gets frozen.
+- Speed, for playback and export.
+- Export an animation as a GIF in the palette's exact colours (transparent
+  paper included), an APNG, a sprite sheet, or the frame on show.
+- Batch develop a folder, from the command palette.
+- The command line: `ferrite-darkroom IN -o OUT [--recipe R] [--scheme K]
+  [--light|--dark]` and `--batch DIR`, with no window.
+
+## 0.3 (merged, not yet released)
+
+Render and compare.
 
 ### Added
 

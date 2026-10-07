@@ -32,9 +32,18 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 
 ## Features
 
-- **Bring a photo.** Drop it on the print, open one with
+- **Bring a photo or an animation.** Drop it on the print, open one with
   <kbd>Ctrl</kbd>+<kbd>O</kbd>, or pass a path: `ferrite-darkroom photo.jpg`.
-  PNG, JPEG, GIF, BMP and WebP. A built-in sample print is there to start.
+  PNG, JPEG, GIF, BMP and WebP, plus animated GIF, APNG and WebP. A built-in
+  sample print is there to start.
+- **Animations.** An animated GIF plays in the print at its own timing, with
+  a timeline under it: <kbd>Space</kbd> plays and pauses, <kbd>,</kbd> and
+  <kbd>.</kbd> step a frame. *Stability* stops error diffusion from
+  shimmering: where the picture stood still, a pixel keeps last frame's
+  colour as long as it still fits, and dots left behind by something moving
+  get cleared. *Speed* changes the timing. Export a GIF in the palette's
+  exact colours (<kbd>Ctrl</kbd>+<kbd>E</kbd>), an APNG, a sprite sheet, or
+  just the frame on show.
 - **Dither.** Twenty algorithms, at 32 to 480 pixels wide:
   - *Error diffusion:* Floyd–Steinberg, Atkinson, Jarvis–Judice–Ninke,
     Stucki, Burkes, Sierra, Sierra two-row, Sierra Lite, False
@@ -83,6 +92,19 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), the ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the
   clipboard (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>).
+- **Batch and command line.** *Batch develop a folder* (command palette)
+  runs the current recipe over every picture in a folder, into a `darkroom`
+  folder beside them. Or skip the window entirely:
+
+  ```bash
+  ferrite-darkroom photo.jpg -o print.png --recipe recipes/gameboy.toml
+  ferrite-darkroom loop.gif -o loop.gif --recipe recipes/dots.toml --scheme phosphor
+  ferrite-darkroom --batch ./photos -o ./prints --recipe recipes/newsprint.toml
+  ```
+
+  The output's extension picks the format: `.png` (an APNG for an
+  animation), `.gif`, or `.txt` for ASCII. Without `--recipe` it uses the
+  app's last recipe; `--help` lists the rest.
 - **Ferrite throughout.** Ten color schemes, a command palette
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with every algorithm,
   palette and character set in it, and a CRT switch-off when you close the window.
@@ -141,6 +163,8 @@ bias = 0.00           # -1 to 1: the threshold
 serpentine = true     # error diffusion alternates direction per row
 match = oklab         # oklab | rgb
 seed = 1              # for algorithm = random
+stability = 0.50      # 0 to 1: animations hold still pixels between frames
+speed = 1.00          # 0.25 to 4: animation playback and export speed
 cols = 160            # dither width in pixels
 scale = 4             # PNG pixel size
 shape = square        # square | circle | diamond | plus
@@ -191,6 +215,9 @@ cargo clippy --all-targets
   matching, palette mapping. Pure and unit-tested.
 - `src/palettes.rs`: the preset palettes and palette-file import.
 - `src/recipe.rs`: the recipe, read and written as settings lines or TOML.
+- `src/sequence.rs`: animations: decoding frames, developing a whole
+  clip with temporal stability, and GIF / APNG / sprite-sheet encoding.
+- `src/batch.rs` and `src/cli.rs`: developing files without a window.
 - `src/render.rs`: how art pixels are drawn (shapes, gutter, paper,
   lattice) for the preview and PNGs, and the compare view's "before".
 - `recipes/`: example recipes; tests check each one loads.

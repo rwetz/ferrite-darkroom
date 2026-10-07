@@ -163,7 +163,9 @@ pub fn gif(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u
         for (art, &delay) in arts.iter().zip(delays) {
             let (_, _, px) = render::rgba(art, scale, look);
             let index: Vec<u8> = px
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| {
                     let key = if p[3] == 0 { [0, 0, 0, 0] } else { [p[0], p[1], p[2], 255] };
                     lookup.get(&key).copied().unwrap_or(0)
