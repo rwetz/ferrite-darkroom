@@ -26,6 +26,14 @@ blue) or a preset palette: Game Boy, Commodore 64, ZX Spectrum, CMYK and
 more. Export a PNG or a text file. It's how you make splash art
 and icons for every other Ferrite app.
 
+The window: the **tone rail** on the left (levels, brightness, contrast,
+gamma, invert: the same in both modes, always in view), the **print** in
+the middle with the mode, its width, the view and the zoom above it and the
+**palette strip** below, and on the right the **Export** button (its menu
+holds every other way out) over four tabs: *Process*, *Cells*, *Mask* and
+*Export*. Each section has a *Reset* that puts its defaults back. Recipes
+and the theme are menus in the title bar.
+
 It's a native desktop app built with [GPUI](https://gpui.rs) and
 [ferrite-design](https://github.com/rwetz/ferrite-design): amber on iron,
 0px corners, pixel type and stepped motion. It runs no webview.
@@ -111,10 +119,12 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   greyscale PNG.
 - **Compare and contact sheet.** *Compare* puts the photo left of a split
   and the art right of it. *Contact sheet* shows the print through all
-  twenty algorithms, or every palette, side by side; click one to use it.
+  twenty algorithms, or every palette, side by side; in ASCII mode, every
+  character set, every font, or every kind of glyph. Click one to use it.
 - **Undo.** <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd>
-  (or <kbd>Ctrl</kbd>+<kbd>Y</kbd>) step through every change to the
-  recipe; a slider drag undoes in one step.
+  (or <kbd>Ctrl</kbd>+<kbd>Y</kbd>) step through every change to any
+  setting: the recipe, the export format, size and frame, the theme. A
+  slider drag undoes in one step.
 - **Your own palettes.** Import one from [Lospec](https://lospec.com/palette-list)
   or anywhere else: `.hex`, GIMP `.gpl`, JASC `.pal`, paint.net `.txt`, or a
   palette image (its distinct colours). Or copy hex colours from anywhere and
