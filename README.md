@@ -6,7 +6,7 @@
 
 <p align="center">
   A <a href="https://github.com/rwetz/ferrite-design">Ferrite</a> dither studio:
-  turn a photo into pixel art or ASCII, in twenty algorithms and any palette, and export it.
+  turn a photo, GIF or video into pixel art or text art, in twenty-nine algorithms and any palette.
 </p>
 
 <p align="center">
@@ -18,9 +18,9 @@
 ![Darkroom developing the sample print with Atkinson dither in amber](docs/main.png)
 
 Darkroom turns photos into dithered pixel art. Drop an image on the window
-and develop it with any of twenty algorithms, from Floyd–Steinberg and
-Atkinson to Bayer matrices, blue noise and a halftone dot, or as ASCII with
-ferrite-design's glyph-fitted character sets. The art takes the colours of
+and develop it with any of twenty-nine algorithms, from Floyd–Steinberg and
+Atkinson to Bayer matrices, CMYK halftones, engraving lines and stippling,
+or as ASCII, braille and block art. The art takes the colours of
 whichever Ferrite scheme you pick (amber on iron, phosphor green, cyanotype
 blue) or a preset palette: Game Boy, Commodore 64, ZX Spectrum, CMYK and
 more. Export a PNG or a text file. It's how you make splash art
@@ -32,24 +32,34 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 
 ## Features
 
-- **Bring a photo or an animation.** Drop it on the print, open one with
-  <kbd>Ctrl</kbd>+<kbd>O</kbd>, or pass a path: `ferrite-darkroom photo.jpg`.
-  PNG, JPEG, GIF, BMP and WebP, plus animated GIF, APNG and WebP. A built-in
-  sample print is there to start.
+- **Bring a photo, an animation or a video.** Drop it on the print, open one
+  with <kbd>Ctrl</kbd>+<kbd>O</kbd>, or pass a path: `ferrite-darkroom photo.jpg`.
+  PNG, JPEG, GIF, BMP and WebP, animated GIF, APNG and WebP, and with
+  [ffmpeg](https://ffmpeg.org/download.html) installed, video (MP4, MOV,
+  WebM, MKV, AVI), sampled at 15 frames a second. A built-in sample print
+  is there to start.
 - **Animations.** An animated GIF plays in the print at its own timing, with
   a timeline under it: <kbd>Space</kbd> plays and pauses, <kbd>,</kbd> and
   <kbd>.</kbd> step a frame. *Stability* stops error diffusion from
   shimmering: where the picture stood still, a pixel keeps last frame's
   colour as long as it still fits, and dots left behind by something moving
   get cleared. *Speed* changes the timing. Export a GIF in the palette's
-  exact colours (<kbd>Ctrl</kbd>+<kbd>E</kbd>), an APNG, a sprite sheet, or
-  just the frame on show.
-- **Dither.** Twenty algorithms, at 32 to 480 pixels wide:
+  exact colours (<kbd>Ctrl</kbd>+<kbd>E</kbd>), an APNG, a sprite sheet, an
+  MP4 (with ffmpeg), or just the frame on show.
+- **Dither.** Twenty-nine algorithms, at 32 to 480 pixels wide:
   - *Error diffusion:* Floyd–Steinberg, Atkinson, Jarvis–Judice–Ninke,
     Stucki, Burkes, Sierra, Sierra two-row, Sierra Lite, False
-    Floyd–Steinberg, Shiau–Fan and Shiau–Fan 2, with a serpentine switch.
+    Floyd–Steinberg, Shiau–Fan and Shiau–Fan 2 (with a serpentine switch),
+    Riemersma along a Hilbert curve, and Knuth's dot diffusion.
   - *Ordered:* Bayer 2×2, 4×4, 8×8 and 16×16, blue noise, interleaved
     gradient noise, an 8×8 halftone dot, random, and plain threshold.
+  - *Print and drawing:* a CMYK halftone with each ink screened at its own
+    angle (try the 3-bit palette), crosshatch, engraving lines, and
+    weighted-Voronoi stippling.
+  - *Many-colour patterns:* Knoll and Yliluoma, which mix palette colours
+    by plan rather than by error.
+  - *Custom tile:* import a small square greyscale picture as your own
+    threshold matrix.
   - *Strength* from 0 (flat posterise) to 200% (crunchy), and a
     *threshold* that moves where ink starts.
   The preview draws whole device pixels per art pixel, so it's exactly the
@@ -69,7 +79,9 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   on its background (light appearance gives dark ink on light paper). Or
   pick a preset: Black & white, RGB, CMYK, 3-bit, Game Boy, Teletext,
   Apple II, Commodore 64, ZX Spectrum, 6-bit RGB, 2-bit grey, Vaporwave
-  or Hacker. Colours are matched in Oklab (as the eye sees) or RGB, and a
+  or Hacker, or the photo's own palette (*From photo*, 2 to 32 colours by
+  k-means). Colours are matched in Oklab (as the eye sees), RGB, or linear
+  light (so a dither averages to the photo's real brightness), and a
   palette without a true black or white still gets the photo's whole tonal
   range. Two-colour palettes dither by lightness, so any ink on any paper
   keeps every tone.
@@ -178,7 +190,8 @@ colors = 0f380f 306230 8bac0f 9bbc0f   # palette = custom: its colours
 strength = 1.00       # 0 to 2
 bias = 0.00           # -1 to 1: the threshold
 serpentine = true     # error diffusion alternates direction per row
-match = oklab         # oklab | rgb
+match = oklab         # oklab | rgb | linear
+tile = 0 8 12 4 / 9 13 5 1 / 14 6 2 10 / 7 3 11 15   # algorithm = tile: ranks, rows split by /
 seed = 1              # for algorithm = random
 stability = 0.50      # 0 to 1: animations hold still pixels between frames
 speed = 1.00          # 0.25 to 4: animation playback and export speed
@@ -249,8 +262,11 @@ cargo clippy --all-targets
   matching, palette mapping. Pure and unit-tested.
 - `src/palettes.rs`: the preset palettes and palette-file import.
 - `src/recipe.rs`: the recipe, read and written as settings lines or TOML.
-- `src/sequence.rs`: animations: decoding frames, developing a whole
-  clip with temporal stability, and GIF / APNG / sprite-sheet encoding.
+- `src/algos.rs`: Riemersma, dot diffusion, the Knoll and Yliluoma
+  pattern dithers, the CMYK halftone and stippling.
+- `src/sequence.rs`: animations and video: decoding frames, developing a
+  whole clip with temporal stability, and GIF / APNG / sprite-sheet / MP4
+  encoding.
 - `src/batch.rs` and `src/cli.rs`: developing files without a window.
 - `src/textart.rs`: text art: glyph sets, cell colours, and the text,
   ANSI, HTML, SVG, PNG and film exports.

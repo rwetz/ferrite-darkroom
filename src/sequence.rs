@@ -3,17 +3,20 @@
 //! both alike.
 //!
 //! - **In:** GIF, APNG and animated WebP, decoded a frame at a time and
-//!   shrunk as they arrive, so a long clip never sits in memory at full size.
+//!   shrunk as they arrive, so a long clip never sits in memory at full size;
+//!   video (MP4, MOV, WebM, MKV, AVI) through ffmpeg when it's installed.
 //! - **Develop:** every frame through the same recipe, with *temporal
 //!   stability*: where the photo barely changed since the last frame, the
 //!   last frame's pixels are kept, so error diffusion doesn't shimmer.
-//! - **Out:** GIF in the palette's exact colours, APNG, or a sprite sheet.
+//! - **Out:** GIF in the palette's exact colours, APNG, a sprite sheet, or
+//!   (through ffmpeg) MP4.
 //!
 //! Pure apart from reading the file, like `studio`.
 
 use std::collections::HashMap;
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use image::AnimationDecoder;
 
@@ -29,6 +32,9 @@ const ANIM_W: u32 = 480;
 /// Stop decoding past this many frames or this many working pixels in all.
 const MAX_FRAMES: usize = 600;
 const MAX_PIXELS: u64 = 40_000_000;
+/// Video files ffmpeg opens, and the rate it samples them at.
+pub const VIDEO: [&str; 7] = ["mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg"];
+const VIDEO_FPS: u32 = 15;
 
 pub struct Frame {
     pub print: Print,
@@ -72,6 +78,7 @@ pub fn load(path: &Path) -> Result<Clip, String> {
             let decoder = image::codecs::webp::WebPDecoder::new(open()?).map_err(|e| e.to_string())?;
             if decoder.has_animation() { Some(take(decoder.into_frames())?) } else { None }
         }
+        v if VIDEO.contains(&v) => return load_video(path),
         _ => None,
     };
     match frames {
@@ -204,6 +211,111 @@ pub fn apng(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<
         writer.finish().map_err(|e| e.to_string())?;
     }
     Ok(out)
+}
+
+/// `ffmpeg`, without a console window flashing up on Windows.
+fn ffmpeg() -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("ffmpeg");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Whether ffmpeg is on the PATH (video in, MP4 out).
+pub fn has_ffmpeg() -> bool {
+    ffmpeg().arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+const NO_FFMPEG: &str = "video needs ffmpeg on the PATH (https://ffmpeg.org/download.html)";
+
+/// Split ffmpeg's stream of PNGs at each image's end (the IEND chunk and
+/// its CRC).
+fn split_pngs(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i + 8 <= bytes.len() {
+        if &bytes[i..i + 4] == b"IEND" {
+            out.push(&bytes[start..i + 8]);
+            start = i + 8;
+            i = start;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A video, sampled at 15 frames a second and at most the working width.
+fn load_video(path: &Path) -> Result<Clip, String> {
+    let output = ffmpeg()
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-vf", &format!("fps={VIDEO_FPS},scale='min({ANIM_W},iw)':-2"), "-frames:v", &(MAX_FRAMES + 1).to_string(), "-f", "image2pipe", "-c:v", "png", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|_| NO_FFMPEG.to_string())?;
+    if !output.status.success() {
+        let why = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg couldn't read it: {}", why.lines().next().unwrap_or("unknown error")));
+    }
+    let mut frames = Vec::new();
+    let mut pixels = 0u64;
+    let mut truncated = false;
+    for png in split_pngs(&output.stdout) {
+        let img = image::load_from_memory(png).map_err(|e| format!("couldn't decode a video frame: {e}"))?;
+        let print = to_print(img.to_rgba8());
+        pixels += (print.w * print.h) as u64;
+        if frames.len() == MAX_FRAMES || pixels > MAX_PIXELS {
+            truncated = true;
+            break;
+        }
+        frames.push(Frame { print, delay_ms: 1000 / VIDEO_FPS });
+    }
+    if frames.is_empty() {
+        return Err("the video has no frames".into());
+    }
+    Ok(Clip { frames, truncated })
+}
+
+/// An MP4 (H.264) through ffmpeg, at the average frame rate, pixels kept
+/// sharp (nearest-neighbour) and padded to even sizes as H.264 needs.
+pub fn mp4(arts: &[Art], delays: &[u32], scale: u32, look: Look) -> Result<Vec<u8>, String> {
+    if arts.is_empty() {
+        return Err("nothing to export".into());
+    }
+    let average = delays.iter().map(|&d| d as f32).sum::<f32>() / delays.len().max(1) as f32;
+    let fps = (1000. / average.max(1.)).round().clamp(1., 60.) as u32;
+    let target = std::env::temp_dir().join(format!("darkroom-{}-{}.mp4", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+    let mut child = ffmpeg()
+        .args(["-v", "error", "-y", "-f", "image2pipe", "-framerate", &fps.to_string(), "-c:v", "png", "-i", "-"])
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-movflags", "+faststart"])
+        .arg(&target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| NO_FFMPEG.to_string())?;
+    {
+        let stdin = child.stdin.as_mut().ok_or("couldn't talk to ffmpeg")?;
+        for art in arts {
+            let png = render::png(art, scale, look)?;
+            stdin.write_all(&png).map_err(|e| format!("ffmpeg stopped reading: {e}"))?;
+        }
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    let result = if output.status.success() {
+        std::fs::read(&target).map_err(|e| e.to_string())
+    } else {
+        Err(format!("ffmpeg couldn't encode: {}", String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("unknown error")))
+    };
+    let _ = std::fs::remove_file(&target);
+    result
 }
 
 /// Every frame on one PNG, left to right then down, as near square as fits.
@@ -351,6 +463,33 @@ mod tests {
         assert_eq!(clip.frames[0].print.w, ANIM_W);
         assert_eq!(clip.frames[1].delay_ms, 120);
         assert!(clip.frames[1].print.lum[0] > 0.9 && clip.frames[0].print.lum[0] < 0.1);
+    }
+
+    #[test]
+    fn png_streams_split_at_each_end() {
+        let one = render::png(&studio::develop(&moving(1)[0].print, 8, Adjust::default(), BW.to_vec(), params(Algo::Bayer4)), 1, Look::default()).unwrap();
+        let stream = [one.clone(), one.clone(), one.clone()].concat();
+        let parts = split_pngs(&stream);
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|p| *p == one.as_slice()));
+    }
+
+    #[test]
+    fn video_round_trips_through_ffmpeg() {
+        if !has_ffmpeg() {
+            eprintln!("ffmpeg isn't installed; skipping");
+            return;
+        }
+        let frames = moving(6);
+        let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
+        let bytes = mp4(&arts, &delays(&frames, 1.), 4, Look::default()).unwrap();
+        assert!(bytes.len() > 100 && &bytes[4..8] == b"ftyp", "not an MP4");
+        let path = std::env::temp_dir().join(format!("darkroom-test-{}.mp4", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let clip = load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(clip.is_animated(), "{} frames", clip.frames.len());
+        assert_eq!(clip.frames[0].print.w, 128);
     }
 
     #[test]

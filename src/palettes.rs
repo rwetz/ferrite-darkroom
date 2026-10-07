@@ -123,6 +123,55 @@ pub fn from_pixels(pixels: impl IntoIterator<Item = [u8; 3]>) -> Result<Vec<Rgb>
     finish(seen.into_iter().map(|p| p.map(|c| c as f32 / 255.)).collect())
 }
 
+/// The photo's own palette: `k` colours by k-means in Oklab (seeded
+/// k-means++ style, deterministically), over at most ~20,000 samples.
+pub fn extract(pixels: &[Rgb], k: usize) -> Vec<Rgb> {
+    use crate::engine::{from_oklab, oklab};
+    let k = k.clamp(2, MAX);
+    let stride = (pixels.len() / 20_000).max(1);
+    let samples: Vec<[f32; 3]> = pixels.iter().step_by(stride).map(|&c| oklab(c)).collect();
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    let d2 = |a: [f32; 3], b: [f32; 3]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
+    // Seeds: the darkest sample, then each next the sample farthest from
+    // every seed so far (the deterministic cousin of k-means++).
+    let mut centres = vec![*samples.iter().min_by(|a, b| a[0].total_cmp(&b[0])).unwrap()];
+    while centres.len() < k {
+        let far = samples.iter().max_by(|&&a, &&b| {
+            let near = |s: [f32; 3]| centres.iter().map(|&c| d2(s, c)).fold(f32::MAX, f32::min);
+            near(a).total_cmp(&near(b))
+        });
+        match far {
+            Some(&s) if !centres.contains(&s) => centres.push(s),
+            _ => break,
+        }
+    }
+    for _ in 0..12 {
+        let mut sums = vec![([0f32; 3], 0usize); centres.len()];
+        for &s in &samples {
+            let i = (0..centres.len()).min_by(|&a, &b| d2(s, centres[a]).total_cmp(&d2(s, centres[b]))).unwrap_or(0);
+            let e = &mut sums[i];
+            e.0 = [e.0[0] + s[0], e.0[1] + s[1], e.0[2] + s[2]];
+            e.1 += 1;
+        }
+        for (c, (sum, n)) in centres.iter_mut().zip(&sums) {
+            if *n > 0 {
+                *c = sum.map(|v| v / *n as f32);
+            }
+        }
+    }
+    centres.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    let mut out: Vec<Rgb> = Vec::new();
+    for c in centres {
+        let rgb = from_oklab(c).map(|v| (v * 255.).round() / 255.);
+        if !out.contains(&rgb) {
+            out.push(rgb);
+        }
+    }
+    out
+}
+
 /// A palette from a file: an image's distinct colours, or a palette file.
 pub fn load(path: &std::path::Path) -> Result<Vec<Rgb>, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -181,6 +230,22 @@ mod tests {
     fn reads_paint_net() {
         let txt = ";paint.net Palette File\n;Colors: 4\nFF0F380F\nFF306230\nFF8BAC0F\nFF9BBC0F\n";
         assert_eq!(parse(txt).unwrap(), GB);
+    }
+
+    #[test]
+    fn extracts_the_photos_colours() {
+        // Three flat colours: three clusters, found exactly, darkest first.
+        let mut px = vec![[0.9, 0.1, 0.1]; 300];
+        px.extend(vec![[0.1, 0.2, 0.8]; 300]);
+        px.extend(vec![[0.95, 0.95, 0.9]; 300]);
+        let pal = extract(&px, 3);
+        assert_eq!(pal.len(), 3);
+        for c in [[0.9, 0.1, 0.1], [0.1, 0.2, 0.8], [0.95, 0.95, 0.9]] {
+            assert!(pal.iter().any(|p| p.iter().zip(&c).all(|(a, b)| (a - b).abs() < 0.01)), "{c:?} in {pal:?}");
+        }
+        assert!(crate::engine::oklab(pal[0])[0] < crate::engine::oklab(pal[2])[0]);
+        // Asking for more colours than there are gives what there is.
+        assert_eq!(extract(&px, 8).len(), 3);
     }
 
     #[test]

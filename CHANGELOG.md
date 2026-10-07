@@ -6,7 +6,23 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
-The 0.6 milestone in [the roadmap](docs/ROADMAP.md): the text-art engine.
+The 0.7 milestone in [the roadmap](docs/ROADMAP.md): the long tail.
+
+### Added
+
+- Nine algorithms (twenty-nine in all): Riemersma (error diffusion along a
+  Hilbert curve), Knuth's dot diffusion, Knoll and Yliluoma pattern
+  dithers, a CMYK halftone with screen angles, crosshatch, engraving lines,
+  weighted-Voronoi stippling, and a custom threshold tile imported from a
+  small greyscale picture.
+- Linear-light colour matching.
+- Palette extraction: the photo's own 2 to 32 colours by k-means in Oklab.
+- Video in (MP4, MOV, WebM, MKV, AVI) and MP4 out, through ffmpeg when it's
+  installed; `.mp4` on the command line and in batches.
+
+## 0.6 (merged, not yet released)
+
+The text-art engine.
 
 ### Added
 
