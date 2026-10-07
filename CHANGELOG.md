@@ -4,6 +4,15 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] - 2026-10-07
+
+### Fixed
+
+- A print bigger than the window (zoomed in, or a tall or wide one) spilled
+  over the toolbar and sidebar instead of scrolling: the scroll pane kept
+  the overflowing side at the print's full size. It now clips to the room
+  and scrolls, with its scrollbars.
+
 ## [1.2.1] - 2026-10-07
 
 ### Fixed
@@ -231,6 +240,7 @@ The first release.
 - The shared look from Lodestone (`FERRITE_*`) when launched from it.
 - The pixel-art logo as the Windows executable, window and taskbar icon.
 
+[1.2.2]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.2
 [1.2.1]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.1
 [1.2.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.0
 [1.1.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.1.0
