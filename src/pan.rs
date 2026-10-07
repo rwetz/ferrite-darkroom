@@ -44,6 +44,16 @@ pub fn overflow(w: f32, h: f32, room_w: f32, room_h: f32) -> (bool, bool) {
     (x, y)
 }
 
+/// The visible part of content `w`×`h` in the room: an axis that
+/// overflows is cut to the room, less the other axis's bar if it has one.
+pub fn viewport(w: f32, h: f32, room_w: f32, room_h: f32) -> (f32, f32) {
+    let (ox, oy) = overflow(w, h, room_w, room_h);
+    let bar = f32::from(WIDTH);
+    let vw = if ox { (room_w - if oy { bar } else { 0. }).max(1.) } else { w };
+    let vh = if oy { (room_h - if ox { bar } else { 0. }).max(1.) } else { h };
+    (vw, vh)
+}
+
 impl RenderOnce for Pan {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (ox, oy) = overflow(self.w, self.h, self.room_w, self.room_h);
@@ -52,8 +62,7 @@ impl RenderOnce for Pan {
         }
         let handle = window.use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::new()).read(cx).clone();
         let bar = f32::from(WIDTH);
-        let vw = if oy { self.w.min(self.room_w - bar) } else { self.w };
-        let vh = if ox { self.h.min(self.room_h - bar) } else { self.h };
+        let (vw, vh) = viewport(self.w, self.h, self.room_w, self.room_h);
         div()
             .relative()
             .w(px(vw + if oy { bar } else { 0. }))
@@ -200,6 +209,20 @@ mod tests {
         assert_eq!(overflow(500., 900., 600., 800.), (false, true));
         // Only just fits wide; the vertical bar pushes it over.
         assert_eq!(overflow(595., 900., 600., 800.), (true, true));
+    }
+
+    #[test]
+    fn the_viewport_fits_the_room() {
+        let bar = f32::from(WIDTH);
+        // Tall: cut to the room's height, full width (the bar sits beside it).
+        assert_eq!(viewport(500., 1400., 1500., 1000.), (500., 1000.));
+        // Wide: cut to the room's width.
+        assert_eq!(viewport(1600., 400., 1488., 900.), (1488., 400.));
+        // Both: each less the other's bar, and never past the room.
+        let (vw, vh) = viewport(3000., 3000., 1500., 1000.);
+        assert_eq!((vw, vh), (1500. - bar, 1000. - bar));
+        // Fits: as is.
+        assert_eq!(viewport(400., 300., 1500., 1000.), (400., 300.));
     }
 
     #[test]

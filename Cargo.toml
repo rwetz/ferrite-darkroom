@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-darkroom"
-version = "1.2.1"
+version = "1.2.2"
 description = "A Ferrite dither and text-art studio: photos, GIFs and video into pixel art, braille or ASCII, in twenty-nine algorithms and any palette."
 authors = ["Ryan Wetzstein"]
 license = "Apache-2.0"
