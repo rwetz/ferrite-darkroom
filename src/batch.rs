@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::engine::{Rgb, oklab};
-use crate::export::{Format, Size};
+use crate::export::{Format, Frame, Size};
 use crate::recipe::Recipe;
 use crate::studio::{self, Adjust};
 use crate::{render, sequence, textart};
@@ -19,8 +19,9 @@ pub struct Job {
     pub ink: Rgb,
     /// A painted mask, for recipes with `mask = "painted"`.
     pub paint: Option<crate::mask::Paint>,
-    /// How big pictures come out.
+    /// How big pictures come out, and in what frame.
     pub size: Size,
+    pub frame: Frame,
 }
 
 /// A folder batch's result: the files written, and the inputs that failed
@@ -38,13 +39,12 @@ impl Job {
         let p = scheme.palette(if light { Tone::Light } else { Tone::Dark });
         let rgb = |hex: u32| [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff].map(|c| c as f32 / 255.);
         let ink = if recipe.accent_ink { p.accent } else { p.fg };
-        Job { recipe, paper: rgb(p.bg), ink: rgb(ink), paint: None, size: Size::Scale }
+        Job { recipe, paper: rgb(p.bg), ink: rgb(ink), paint: None, size: Size::Scale, frame: Frame::default() }
     }
 
-    fn adjust(&self) -> Adjust {
-        let r = &self.recipe;
+    fn adjust(&self, reference: &studio::Print) -> Adjust {
         let light_ink = oklab(self.ink)[0] > oklab(self.paper)[0];
-        Adjust { brightness: r.brightness, contrast: r.contrast, gamma: r.gamma, invert: r.invert, light_ink }
+        Adjust::new(&self.recipe, light_ink, reference)
     }
 
     /// Develop `input` into `output`. `.gif` makes a GIF (a still makes a
@@ -54,34 +54,41 @@ impl Job {
     /// animation's `.html` is a film that plays every frame).
     pub fn develop_file(&self, input: &Path, output: &Path) -> Result<(), String> {
         let ext = output.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        let clip = sequence::load(input)?;
+        let whole = sequence::load(input)?;
+        let clip = whole.framed(self.frame);
         let r = &self.recipe;
-        let adjust = self.adjust();
+        let adjust = self.adjust(&clip.frames[0].print);
         let colors = r.palette_colors(self.paper, self.ink);
-        let size = self.size;
+        let (size, frame) = (self.size, self.frame);
+        let to = sequence::Out { size, frame };
+        // The painted mask is for the whole photo; crop it with the photo.
+        let p0 = &clip.frames[0].print;
+        let paint = self.paint.as_ref().map(|p| p.reframe([0., 0., 1., 1.], frame.crop(whole.frames[0].print.w, whole.frames[0].print.h), p0.w, p0.h));
+        let paint = paint.as_ref();
         let bytes = match ext.as_str() {
-            "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" => {
+            // Stills; an ASCII recipe's PNG is a picture of the text art too.
+            e if matches!(e, "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff") || (e == "png" && r.mode == crate::recipe::Mode::Ascii && !clip.is_animated()) => {
                 let format = Format::from_key(&ext).unwrap_or_default();
                 match r.mode {
-                    crate::recipe::Mode::Ascii => textart::make(&clip.frames[0].print, r, adjust, &colors, self.paper, self.ink).image(size, r.scale, format)?,
+                    crate::recipe::Mode::Ascii => textart::make(&clip.frames[0].print, r, adjust, &colors, self.paper, self.ink, paint).image(size, frame, r.scale, format)?,
                     crate::recipe::Mode::Dither => {
-                        let art = sequence::develop_all(&clip.frames[..1], r, adjust, &colors, self.paint.as_ref()).remove(0);
-                        render::still(&art, size, r.scale, format, r.look())?
+                        let art = sequence::develop_all(&clip.frames[..1], r, adjust, &colors, paint).remove(0);
+                        render::still(&art, size, frame, r.scale, format, r.look())?
                     }
                 }
             }
             "gif" | "png" | "apng" | "mp4" => {
-                let arts = sequence::develop_all(&clip.frames, r, adjust, &colors, self.paint.as_ref());
+                let arts = sequence::develop_all(&clip.frames, r, adjust, &colors, paint);
                 let delays = sequence::delays(&clip.frames, r.speed);
                 match ext.as_str() {
-                    "gif" => sequence::gif(&arts, &delays, size, r.scale, r.look())?,
-                    "mp4" => sequence::mp4(&arts, &delays, size, r.scale, r.look())?,
-                    _ if clip.is_animated() => sequence::apng(&arts, &delays, size, r.scale, r.look())?,
-                    _ => render::still(&arts[0], size, r.scale, Format::Png, r.look())?,
+                    "gif" => sequence::gif(&arts, &delays, to, r.scale, r.look())?,
+                    "mp4" => sequence::mp4(&arts, &delays, to, r.scale, r.look())?,
+                    _ if clip.is_animated() => sequence::apng(&arts, &delays, to, r.scale, r.look())?,
+                    _ => render::still(&arts[0], size, frame, r.scale, Format::Png, r.look())?,
                 }
             }
             "txt" | "ans" | "html" | "svg" => {
-                let art = |print: &studio::Print| textart::make(print, r, adjust, &colors, self.paper, self.ink);
+                let art = |print: &studio::Print| textart::make(print, r, adjust, &colors, self.paper, self.ink, paint);
                 let first = art(&clip.frames[0].print);
                 let title = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 match ext.as_str() {
@@ -201,7 +208,8 @@ mod tests {
         let dark = Job::with_scheme(Recipe::default(), "ferrite", false);
         let light = Job::with_scheme(Recipe::default(), "ferrite", true);
         assert!(oklab(dark.paper)[0] < 0.3 && oklab(light.paper)[0] > 0.7);
-        assert!(dark.adjust().light_ink && !light.adjust().light_ink);
+        let p = studio::sample();
+        assert!(dark.adjust(&p).light_ink && !light.adjust(&p).light_ink);
         // An unknown scheme falls back to the first.
         assert_eq!(Job::with_scheme(Recipe::default(), "nope", false).paper, dark.paper);
     }

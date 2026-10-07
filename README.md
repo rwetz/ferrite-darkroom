@@ -64,18 +64,26 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
     *threshold* that moves where ink starts.
   The preview draws whole device pixels per art pixel, so it's exactly the
   export.
-- **ASCII and text art.** All thirteen of ferrite-design's character sets,
-  from classic `.:-=+*#%@` to box drawing and the "best character" set,
-  fitted by shape (edges) or by tone (brightness), 20 to 200 characters
-  wide. Or pack more picture into each character: *braille* (2×4 dots),
+- **ASCII and text art.** Plain printable ASCII (the default: its text
+  pastes anywhere) or any of ferrite-design's thirteen character sets, from
+  classic `.:-=+*#%@` to box drawing and "every glyph", fitted by shape
+  (edges) or by tone (brightness) to the chosen font's real glyphs, 16 to
+  240 characters wide. *Smooth gradients* spreads each character's tone
+  error to its neighbours, so a short set doesn't band. Six fonts, all
+  bundled: IBM VGA (the DOS text-mode face), VT323 (a DEC terminal),
+  JetBrains Mono, IBM Plex Mono, Cascadia Mono (full block, box and braille
+  coverage) and Fira Mono. Masks work here too: the background is left as
+  blank paper. Or pack more picture into each character: *braille* (2×4 dots),
   *half blocks* and *quadrants*, dithered with any of the twenty algorithms,
   and *colour half blocks*, two palette-coloured pixels per character.
   Colour each cell with the ink, the photo's own colours or the palette.
   Export plain text, ANSI (24-bit colour, `cat` it in a terminal), HTML,
-  or a picture in any export format (characters drawn from the display
-  face's own pixels); an animation exports as an *ASCII film*, an HTML page
-  that plays itself.
-- **Tone.** Brightness, contrast, gamma and invert.
+  or a picture in any export format (characters drawn in the chosen font,
+  with even, anti-aliased strokes at any size); an animation exports as an
+  *ASCII film*, an HTML page that plays itself. Braille dots have a size.
+- **Tone.** *Auto levels* stretches the photo's own darkest to lightest;
+  a *black point* clears a dark background to paper (and a white point
+  the light end); then brightness, contrast, gamma and invert.
 - **Palette.** *Scheme* inks the art in the scheme's text or accent colour
   on its background (light appearance gives dark ink on light paper). Or
   pick a preset: Black & white, RGB, CMYK, 3-bit, Game Boy, Teletext,
@@ -122,7 +130,10 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   BMP, TIFF or SVG (vector, one path per colour)
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), sized by pixel size (1×, 2×, 4×, 8×) or by
   long edge: HD, Full HD, QHD, 4K, 5K, 8K, or any width up to 8192 px.
-  Animations take the same size. The ASCII as a text file
+  Animations take the same size. A *frame* gives the picture a fixed shape
+  (16:9, 16:10, 21:9, 32:9, 4:3, 1:1, 4:5, 9:16): *fill* crops the photo to
+  it before developing, so a 4K wallpaper is exactly 3840 × 2160; *fit*
+  keeps the whole picture and pads it with paper. The ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the
   clipboard (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>).
 - **A print bigger than the window** scrolls, with scrollbars both ways.
@@ -147,7 +158,9 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   extension picks the format: `.png` (an APNG for an animation), `.gif`,
   a still `.jpg`, `.webp`, `.bmp` or `.tif`, or text art as `.txt`, `.ans`, `.svg` or `.html` (an ASCII film for an
   animation). `--size 8k` (or `4k`, `1080p`, `3000`, …) sets how big
-  pictures come out. Without `--recipe` it uses the
+  pictures come out, `--frame 16:9` (or `16:9-fit`, `21:9`, `9:16`, …) their
+  shape. A recipe value Darkroom doesn't recognise is reported, not
+  silently ignored. Without `--recipe` it uses the
   app's last recipe; `--help` lists the rest.
 - **Ferrite throughout.** Ten color schemes, a command palette
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with every algorithm,
@@ -233,13 +246,19 @@ bg_shape = square     # its cells; bg_lattice also dots a paper background
 bg_gutter = 0.00
 bg_modulate = false
 bg_lattice = 0.00
+levels = auto         # auto | manual: stretch to the photo's own range
+black = 0.00          # 0 to 0.6: tones under this go to black
+white = 1.00          # 0.4 to 1: tones over this go to white
 brightness = 0.00     # -1 to 1
 contrast = 1.00       # 0.25 to 3
 gamma = 1.00          # 0.2 to 5
 invert = false
 ink = accent          # accent | text: the Scheme palette's ink
-charset = best-character
+charset = ascii       # ascii, or a ferrite-design set: classic, box-drawing, best-character, …
 fit = shape           # shape | tone
+diffuse = false       # smooth gradients: spread tone error between characters
+font = vga            # vga | vt323 | jetbrains-mono | plex-mono | cascadia-mono | fira-mono
+dot = 0.72            # braille dot size, 0.3 to 1
 ascii_cols = 80
 glyphs = characters   # characters | braille | half-blocks | quadrants | colour-blocks
 ascii_colour = ink    # ink | photo | palette
@@ -285,6 +304,10 @@ cargo clippy --all-targets
 - `src/batch.rs` and `src/cli.rs`: developing files without a window.
 - `src/textart.rs`: text art: glyph sets, cell colours, and the text,
   ANSI, HTML, SVG, PNG and film exports.
+- `src/fit.rs`: character sets and fitting cells to glyphs (tone, shape,
+  diffusion). `src/fonts.rs`: the bundled faces, drawn at any cell size.
+- `src/export.rs`: export formats, sizes and frames. `src/pan.rs`: the
+  print's two-way scroll pane.
 - `src/mask.rs`: masks (brightness, colour, border flood, painted) and
   their dithered edges.
 - `src/render.rs`: how art pixels are drawn (shapes, gutter, paper,

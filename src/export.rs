@@ -79,9 +79,10 @@ impl Format {
 }
 
 /// How big an export is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Size {
     /// The recipe's pixels per art pixel.
+    #[default]
     Scale,
     /// This long edge in pixels.
     Long(u32),
@@ -128,6 +129,104 @@ impl Size {
             }
         }
     }
+}
+
+/// The shapes a picture can be framed to, by name: screens, phones, prints.
+pub const ASPECTS: [(&str, (u32, u32)); 8] = [
+    ("16:9 screen", (16, 9)),
+    ("16:10 screen", (16, 10)),
+    ("21:9 ultrawide", (21, 9)),
+    ("32:9 super ultrawide", (32, 9)),
+    ("4:3", (4, 3)),
+    ("1:1 square", (1, 1)),
+    ("4:5 portrait", (4, 5)),
+    ("9:16 phone", (9, 16)),
+];
+
+/// What shape the picture comes out: the photo's own, or a fixed aspect,
+/// either filled (the photo cropped to it before developing, so nothing
+/// is wasted) or fitted (the whole picture, padded with paper).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct Frame {
+    pub aspect: Option<(u32, u32)>,
+    pub fill: bool,
+}
+
+impl Frame {
+    pub fn key(self) -> String {
+        match self.aspect {
+            None => "photo".into(),
+            Some((w, h)) => format!("{w}:{h}{}", if self.fill { "" } else { "-fit" }),
+        }
+    }
+
+    /// `photo`, `16:9` (fill), `16:9-fit`, or `21x9`.
+    pub fn parse(s: &str) -> Option<Frame> {
+        let s = s.trim().to_lowercase();
+        if s == "photo" || s.is_empty() {
+            return Some(Frame::default());
+        }
+        let (ratio, fill) = match s.strip_suffix("-fit") {
+            Some(r) => (r, false),
+            None => (s.strip_suffix("-fill").unwrap_or(&s), true),
+        };
+        let (w, h) = ratio.split_once([':', 'x'])?;
+        let (w, h): (u32, u32) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+        (w > 0 && h > 0 && w <= 100 && h <= 100).then_some(Frame { aspect: Some((w, h)), fill })
+    }
+
+    /// The part of a `w`×`h` picture (0..1 each way: x, y, width, height)
+    /// that a fill keeps: the largest centred piece of the frame's shape.
+    pub fn crop(self, w: u32, h: u32) -> [f32; 4] {
+        let Some((aw, ah)) = self.aspect.filter(|_| self.fill) else { return [0., 0., 1., 1.] };
+        let (want, have) = (aw as f32 / ah as f32, w.max(1) as f32 / h.max(1) as f32);
+        if have > want {
+            let k = want / have;
+            [(1. - k) / 2., 0., k, 1.]
+        } else {
+            let k = have / want;
+            [0., (1. - k) / 2., 1., k]
+        }
+    }
+
+    /// The canvas for content `w`×`h` units at `size`, and where the
+    /// content sits on it (x, y, width, height in pixels). Framed pictures
+    /// come out at exactly the frame's shape: filled content is stretched
+    /// the last pixel or two to meet it, fitted content is centred.
+    pub fn canvas(self, w: u32, h: u32, size: Size, scale: u32) -> ((u32, u32), [u32; 4]) {
+        let (cw, ch) = size.dims(w, h, scale);
+        let Some((aw, ah)) = self.aspect else { return ((cw, ch), [0, 0, cw, ch]) };
+        let long = cw.max(ch) as f32;
+        let (fw, fh) = if aw >= ah { (long, long * ah as f32 / aw as f32) } else { (long * aw as f32 / ah as f32, long) };
+        let (fw, fh) = ((fw.round() as u32).max(1), (fh.round() as u32).max(1));
+        if self.fill {
+            return ((fw, fh), [0, 0, fw, fh]);
+        }
+        // Fit: the content as big as goes inside, centred.
+        let k = (fw as f32 / cw as f32).min(fh as f32 / ch as f32);
+        let (iw, ih) = (((cw as f32 * k).round() as u32).clamp(1, fw), ((ch as f32 * k).round() as u32).clamp(1, fh));
+        ((fw, fh), [(fw - iw) / 2, (fh - ih) / 2, iw, ih])
+    }
+}
+
+/// `content` (RGBA, `rect`'s size) on a `w`×`h` canvas of `pad`.
+pub fn place(content: Vec<u8>, (w, h): (u32, u32), rect: [u32; 4], pad: [u8; 4]) -> Vec<u8> {
+    if rect == [0, 0, w, h] {
+        return content;
+    }
+    let mut out: Vec<u8> = std::iter::repeat_n(pad, (w * h) as usize).flatten().collect();
+    let [x, y, cw, ch] = rect;
+    for row in 0..ch.min(h - y) {
+        let src = &content[(row * cw * 4) as usize..][..(cw.min(w - x) * 4) as usize];
+        out[(((y + row) * w + x) * 4) as usize..][..src.len()].copy_from_slice(src);
+    }
+    out
+}
+
+/// `#rrggbb`.
+pub fn hex(c: Rgb) -> String {
+    let [r, g, b] = c.map(|v| (v.clamp(0., 1.) * 255.).round() as u8);
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 /// RGBA pixels as `format`. JPEG and BMP have no alpha: transparent pixels
@@ -195,6 +294,31 @@ mod tests {
             assert_eq!(Format::from_key(f.key()), Some(f));
             assert_eq!(Format::from_key(f.ext()), Some(f));
         }
+    }
+
+    #[test]
+    fn frames() {
+        let wide = Frame { aspect: Some((16, 9)), fill: true };
+        // A 3:2 photo filled to 16:9 loses some top and bottom.
+        let [x, y, w, h] = wide.crop(1200, 800);
+        assert!(x == 0. && w == 1. && y > 0. && (h * 800. * 16. / 9. - 1200.).abs() < 1.);
+        // 4K, exactly.
+        assert_eq!(wide.canvas(160, 91, Size::Long(3840), 1), ((3840, 2160), [0, 0, 3840, 2160]));
+        // Fit pads: a square in a 16:9 frame sits in the middle.
+        let fit = Frame { aspect: Some((16, 9)), fill: false };
+        assert_eq!(fit.canvas(100, 100, Size::Long(1920), 1), ((1920, 1080), [420, 0, 1080, 1080]));
+        assert_eq!(Frame::default().canvas(10, 5, Size::Scale, 2), ((20, 10), [0, 0, 20, 10]));
+        for f in [wide, fit, Frame::default(), Frame { aspect: Some((9, 16)), fill: true }] {
+            assert_eq!(Frame::parse(&f.key()), Some(f));
+        }
+        assert_eq!(Frame::parse("21x9"), Some(Frame { aspect: Some((21, 9)), fill: true }));
+        assert_eq!(Frame::parse("wide"), None);
+    }
+
+    #[test]
+    fn placing_pads() {
+        let px = place(vec![9; 4], (3, 1), [1, 0, 1, 1], [0, 0, 0, 255]);
+        assert_eq!(px, vec![0, 0, 0, 255, 9, 9, 9, 9, 0, 0, 0, 255]);
     }
 
     #[test]

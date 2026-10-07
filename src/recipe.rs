@@ -8,7 +8,10 @@
 //! (quoted strings, arrays). The reader takes either, and ignores `#`
 //! comments, unknown keys and values out of range.
 
-use ferrite_design::ascii::{Charset, Fit};
+use ferrite_design::ascii::Fit;
+
+use crate::fit::Set;
+use crate::fonts::Font;
 
 use crate::engine::{Algo, Params, Rgb, Space, Tile};
 use crate::mask::{self, Kind};
@@ -120,8 +123,20 @@ pub struct Recipe {
     pub invert: bool,
     /// The Scheme palette inks in the accent rather than the text colour.
     pub accent_ink: bool,
-    pub charset: Charset,
+    pub charset: Set,
     pub fit: Fit,
+    /// ASCII: carry each cell's tone error to its neighbours.
+    pub diffuse: bool,
+    /// ASCII: the face the art is drawn and fitted in.
+    pub font: Font,
+    /// ASCII: braille dot size, 0.3..1 of the room a dot has.
+    pub dot: f32,
+    /// Stretch the photo's tones to its own darkest and lightest.
+    pub auto_levels: bool,
+    /// Levels within that range: tones under `black` go to black, over
+    /// `white` to white.
+    pub black: f32,
+    pub white: f32,
     /// ASCII width in characters.
     pub ascii_cols: u32,
     /// ASCII: characters, braille or blocks.
@@ -164,8 +179,14 @@ impl Default for Recipe {
             gamma: 1.,
             invert: false,
             accent_ink: true,
-            charset: Charset::Full,
+            charset: Set::Ascii,
             fit: Fit::Shape,
+            diffuse: false,
+            font: Font::Vga,
+            dot: 0.72,
+            auto_levels: true,
+            black: 0.,
+            white: 1.,
             ascii_cols: 80,
             glyphs: Glyphs::Characters,
             ascii_tint: Tint::Ink,
@@ -247,10 +268,6 @@ pub fn parse_line(line: &str) -> Option<(String, Value)> {
         Value::Bare(v.to_string())
     };
     Some((k.trim().to_string(), value))
-}
-
-fn charset_key(c: Charset) -> String {
-    c.name().replace(' ', "-")
 }
 
 fn flag(v: &str, default: bool) -> bool {
@@ -343,8 +360,14 @@ impl Recipe {
             "gamma" => self.gamma = f(0.2, 5., self.gamma),
             "invert" => self.invert = flag(v, self.invert),
             "ink" => self.accent_ink = v != "text",
-            "charset" => self.charset = Charset::ALL.into_iter().find(|c| charset_key(*c) == v).unwrap_or(self.charset),
+            "charset" => self.charset = Set::from_key(v).unwrap_or(self.charset),
             "fit" => self.fit = if v == "tone" { Fit::Tone } else { Fit::Shape },
+            "diffuse" => self.diffuse = flag(v, self.diffuse),
+            "font" => self.font = Font::from_key(v).unwrap_or(self.font),
+            "dot" => self.dot = f(0.3, 1., self.dot),
+            "levels" => self.auto_levels = v != "manual",
+            "black" => self.black = f(0., 0.6, self.black),
+            "white" => self.white = f(0.4, 1., self.white),
             "ascii_cols" => self.ascii_cols = u(16, 240, self.ascii_cols),
             "glyphs" => self.glyphs = Glyphs::from_key(v).unwrap_or(self.glyphs),
             "ascii_colour" => self.ascii_tint = Tint::from_key(v).unwrap_or(self.ascii_tint),
@@ -404,13 +427,19 @@ impl Recipe {
             ("bg_gutter", bare(format!("{:.2}", self.bg_cells.gutter))),
             ("bg_modulate", bare(self.bg_cells.modulate.to_string())),
             ("bg_lattice", bare(format!("{:.2}", self.bg_cells.lattice))),
+            ("levels", text(if self.auto_levels { "auto" } else { "manual" })),
+            ("black", bare(format!("{:.2}", self.black))),
+            ("white", bare(format!("{:.2}", self.white))),
             ("brightness", bare(format!("{:.2}", self.brightness))),
             ("contrast", bare(format!("{:.2}", self.contrast))),
             ("gamma", bare(format!("{:.2}", self.gamma))),
             ("invert", bare(self.invert.to_string())),
             ("ink", text(if self.accent_ink { "accent" } else { "text" })),
-            ("charset", text(&charset_key(self.charset))),
+            ("charset", text(&self.charset.key())),
             ("fit", text(if self.fit == Fit::Tone { "tone" } else { "shape" })),
+            ("diffuse", bare(self.diffuse.to_string())),
+            ("font", text(self.font.key())),
+            ("dot", bare(format!("{:.2}", self.dot))),
             ("ascii_cols", bare(self.ascii_cols.to_string())),
             ("glyphs", text(self.glyphs.key())),
             ("ascii_colour", text(self.ascii_tint.key())),
@@ -453,6 +482,32 @@ impl Recipe {
             return Err("there's no Darkroom recipe in that file".into());
         }
         Ok(r)
+    }
+
+    /// What in a recipe file Darkroom couldn't use: unknown settings, and
+    /// values it didn't recognise (and so left as they were).
+    pub fn check(src: &str) -> Vec<String> {
+        let base = Recipe::default();
+        let defaults = base.pairs();
+        let mut out = Vec::new();
+        for (k, v) in src.trim_start_matches('\u{feff}').lines().filter_map(parse_line) {
+            let mut r = base.clone();
+            if !r.apply(&k, &v) {
+                out.push(format!("unknown setting `{k}`"));
+                continue;
+            }
+            if r != base || matches!(v, Value::List(_)) {
+                continue;
+            }
+            // Nothing changed: fine if it says the default, else ignored.
+            let Some((_, d)) = defaults.iter().find(|(dk, _)| *dk == k) else { continue };
+            let (given, default) = (v.as_str().to_lowercase(), d.as_str().to_lowercase());
+            let same_number = matches!((given.parse::<f32>(), default.parse::<f32>()), (Ok(a), Ok(b)) if (a - b).abs() < 1e-4);
+            if given != default && !same_number && !(k == "levels" && given != "manual") {
+                out.push(format!("`{k} = {}` isn't a value Darkroom knows; using {}", v.as_str(), d.as_str()));
+            }
+        }
+        out
     }
 
     pub fn look(&self) -> Look {
@@ -530,7 +585,13 @@ mod tests {
             gamma: 1.8,
             invert: true,
             accent_ink: false,
-            charset: Charset::Box,
+            charset: Set::Ferrite(ferrite_design::ascii::Charset::Box),
+            diffuse: false,
+            font: Font::Cascadia,
+            dot: 0.5,
+            auto_levels: false,
+            black: 0.12,
+            white: 0.9,
             fit: Fit::Tone,
             ascii_cols: 120,
             glyphs: Glyphs::Braille,
@@ -627,6 +688,21 @@ mod tests {
         assert_eq!((lattice.background, lattice.bg_algo, lattice.bg_cells.gutter), (Background::Own, Algo::Bayer4, 0.35));
         let dots = Recipe::from_toml(include_str!("../recipes/dots.toml")).unwrap();
         assert_eq!((dots.shape, dots.modulate, dots.gutter, dots.scale), (Shape::Circle, true, 0.15, 8));
+    }
+
+    #[test]
+    fn check_finds_what_it_cannot_use() {
+        let w = Recipe::check("charset = \"Classic\"
+font = \"comic-sans\"
+wobble = 3
+scale = 4
+cols = 200
+");
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("comic-sans") && w[1].contains("wobble"));
+        for (name, src) in BUNDLED {
+            assert!(Recipe::check(src).is_empty(), "{name}: {:?}", Recipe::check(src));
+        }
     }
 
     #[test]

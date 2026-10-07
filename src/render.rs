@@ -8,7 +8,7 @@
 //! art. Pure, so the preview and the PNG export draw identical pixels.
 
 use crate::engine::{Rgb, oklab};
-use crate::export::{self, Format, Size};
+use crate::export::{self, Format, Frame, Size};
 use crate::studio::{Art, Print};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -344,15 +344,33 @@ pub fn png(art: &Art, scale: u32, look: Look) -> Result<Vec<u8>, String> {
     export::encode(w, h, px, Format::Png, [1.; 3])
 }
 
-/// A still in any format at `size`. Formats without alpha lay transparent
-/// paper on the paper colour.
-pub fn still(art: &Art, size: Size, scale: u32, format: Format, look: Look) -> Result<Vec<u8>, String> {
-    let (w, h) = size.dims(art.w, art.h, scale);
+/// A still in any format at `size`, in `frame`. Formats without alpha lay
+/// transparent paper on the paper colour.
+pub fn still(art: &Art, size: Size, frame: Frame, scale: u32, format: Format, look: Look) -> Result<Vec<u8>, String> {
+    let paper = art.colors[paper_index(&art.colors, look.paper)];
+    let ((w, h), rect) = frame.canvas(art.w, art.h, size, scale);
     if format == Format::Svg {
-        return Ok(svg(art, w, h, look).into_bytes());
+        let inner = svg(art, rect[2], rect[3], look);
+        if rect == [0, 0, w, h] {
+            return Ok(inner.into_bytes());
+        }
+        let back = if look.transparent { String::new() } else { format!("<rect width=\"{w}\" height=\"{h}\" fill=\"{}\"/>
+", export::hex(paper)) };
+        let inner = inner.replacen("<svg ", &format!("<svg x=\"{}\" y=\"{}\" ", rect[0], rect[1]), 1);
+        return Ok(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\">
+{back}{inner}</svg>
+").into_bytes());
     }
-    let (w, h, px) = rgba_sized(art, w, h, look);
-    export::encode(w, h, px, format, art.colors[paper_index(&art.colors, look.paper)])
+    let (w, h, px) = framed(art, size, frame, scale, look);
+    export::encode(w, h, px, format, paper)
+}
+
+/// The print's pixels at `size` in `frame`: RGBA, padded with paper.
+pub fn framed(art: &Art, size: Size, frame: Frame, scale: u32, look: Look) -> (u32, u32, Vec<u8>) {
+    let ((w, h), rect) = frame.canvas(art.w, art.h, size, scale);
+    let (_, _, px) = rgba_sized(art, rect[2], rect[3], look);
+    let pad = if look.transparent { [0; 4] } else { rgba8(art.colors[paper_index(&art.colors, look.paper)]) };
+    (w, h, export::place(px, (w, h), rect, pad))
 }
 
 /// The untouched photo at the art's size, BGRA at `cell`: the "before".
@@ -500,7 +518,7 @@ mod tests {
     #[test]
     fn stills_in_every_format() {
         for f in Format::ALL {
-            let bytes = still(&art(), Size::Long(64), 1, f, Look::default()).unwrap();
+            let bytes = still(&art(), Size::Long(64), Frame::default(), 1, f, Look::default()).unwrap();
             if f != Format::Svg {
                 let img = image::load_from_memory(&bytes).unwrap();
                 assert_eq!((img.width(), img.height()), (64, 32), "{f:?}");

@@ -3,8 +3,8 @@
 //! HTML, SVG, and an HTML "film" for animations).
 //!
 //! Glyph sets:
-//! - **Characters:** ferrite-design's thirteen character sets, fitted to
-//!   the display face's real glyphs by shape or tone.
+//! - **Characters:** plain ASCII or ferrite-design's thirteen sets, fitted
+//!   to the chosen font's real glyphs by shape or tone (see `fit`).
 //! - **Braille** (2×4 dots a cell), **half blocks** (1×2) and **quadrants**
 //!   (2×2): the picture is dithered at sub-cell resolution with any of the
 //!   engine's algorithms and the dots packed into glyphs, so a cell carries
@@ -16,6 +16,9 @@
 //! Pure.
 
 use crate::engine::{self, Rgb, oklab};
+use crate::fit::{self, SUB_H, SUB_W};
+use crate::fonts::Font;
+use crate::mask::{self, Paint};
 use crate::recipe::Recipe;
 use crate::studio::{self, Adjust, Print};
 
@@ -117,6 +120,10 @@ pub struct TextArt {
     pub cells: Vec<Cell>,
     pub ink: Rgb,
     pub paper: Rgb,
+    /// The face characters are drawn in.
+    pub font: Font,
+    /// Braille dot size, a share of the room a dot has.
+    pub dot: f32,
 }
 
 const QUADRANTS: [char; 16] = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█'];
@@ -128,11 +135,27 @@ pub fn rows_for(print: &Print, cols: usize) -> usize {
     ((cols as f32 * print.aspect() / 2.).round() as usize).max(1)
 }
 
+/// Which cells a mask leaves out: in text art the background is always
+/// blank paper. `None` when there's no mask.
+fn cut(print: &Print, r: &Recipe, adjust: Adjust, paint: Option<&Paint>, cols: usize, rows: usize) -> Option<Vec<bool>> {
+    if r.mask.kind == mask::Kind::None {
+        return None;
+    }
+    let (w, h) = (cols as u32, rows as u32);
+    let pixels: Vec<Rgb> = print.resize(w, h).rgb.iter().map(|&c| adjust.color(c)).collect();
+    let painted = paint.map(|p| p.resize(w, h));
+    let soft = mask::compute(&r.mask, &pixels, w, h, painted.as_deref());
+    Some(mask::select(&soft, w).into_iter().map(|subject| !subject).collect())
+}
+
 /// The print as text art. `palette` is the recipe's colours; `paper` and
-/// `ink` the two the art sits in when it isn't coloured per cell.
-pub fn make(print: &Print, r: &Recipe, adjust: Adjust, palette: &[Rgb], paper: Rgb, ink: Rgb) -> TextArt {
+/// `ink` the two the art sits in when it isn't coloured per cell. A mask
+/// leaves the background cells blank.
+pub fn make(print: &Print, r: &Recipe, adjust: Adjust, palette: &[Rgb], paper: Rgb, ink: Rgb, paint: Option<&Paint>) -> TextArt {
     let cols = r.ascii_cols as usize;
     let rows = rows_for(print, cols);
+    let skip = cut(print, r, adjust, paint, cols, rows);
+    let blank = |at: usize| skip.as_ref().is_some_and(|s| s[at]);
     let tint = |x: usize, y: usize, avg: &[Rgb]| -> Option<Rgb> {
         match r.ascii_tint {
             Tint::Ink => None,
@@ -144,15 +167,17 @@ pub fn make(print: &Print, r: &Recipe, adjust: Adjust, palette: &[Rgb], paper: R
 
     let cells: Vec<Cell> = match r.glyphs {
         Glyphs::Characters => {
-            let lines = studio::ascii_lines(print, cols, adjust, r.charset, r.fit);
+            // Ink at 4×8 samples a cell: square samples of the 8×16 cell.
+            let small = print.resize((cols * SUB_W) as u32, (rows * SUB_H) as u32);
+            let levels: Vec<f32> = studio::ink_levels(&small, adjust).into_iter().map(|v| v as f32 / 255.).collect();
+            let style = fit::Style { set: r.charset, fit: r.fit, diffuse: r.diffuse, font: r.font };
+            let chars = fit::fit(&levels, cols, rows, style, skip.as_deref());
             let avg = if r.ascii_tint == Tint::Ink { Vec::new() } else { averages() };
-            let mut cells = Vec::with_capacity(cols * lines.len());
-            for (y, line) in lines.iter().enumerate() {
-                for (x, ch) in line.chars().chain(std::iter::repeat(' ')).take(cols).enumerate() {
-                    cells.push(Cell { ch, fg: if avg.is_empty() || y >= rows { None } else { tint(x, y, &avg) }, bg: None });
-                }
-            }
-            return TextArt { rows: cells.len() / cols.max(1), cols, cells, ink, paper };
+            chars
+                .into_iter()
+                .enumerate()
+                .map(|(at, ch)| Cell { ch, fg: if avg.is_empty() { None } else { tint(at % cols, at / cols, &avg) }, bg: None })
+                .collect()
         }
         Glyphs::ColorBlocks => {
             let (sw, sh) = (cols as u32, rows as u32 * 2);
@@ -161,6 +186,9 @@ pub fn make(print: &Print, r: &Recipe, adjust: Adjust, palette: &[Rgb], paper: R
             (0..rows)
                 .flat_map(|y| (0..cols).map(move |x| (x, y)))
                 .map(|(x, y)| {
+                    if blank(y * cols + x) {
+                        return Cell { ch: ' ', fg: None, bg: None };
+                    }
                     let top = palette[index[(y * 2) * cols + x] as usize];
                     let bottom = palette[index[(y * 2 + 1) * cols + x] as usize];
                     Cell { ch: '▀', fg: Some(top), bg: Some(bottom) }
@@ -179,6 +207,9 @@ pub fn make(print: &Print, r: &Recipe, adjust: Adjust, palette: &[Rgb], paper: R
             (0..rows)
                 .flat_map(|y| (0..cols).map(move |x| (x, y)))
                 .map(|(x, y)| {
+                    if blank(y * cols + x) {
+                        return Cell { ch: ' ', fg: None, bg: None };
+                    }
                     let (bx, by) = (x as u32 * sx, y as u32 * sy);
                     let ch = match g {
                         Glyphs::Braille => {
@@ -196,7 +227,7 @@ pub fn make(print: &Print, r: &Recipe, adjust: Adjust, palette: &[Rgb], paper: R
                 .collect()
         }
     };
-    TextArt { cols, rows, cells, ink, paper }
+    TextArt { cols, rows, cells, ink, paper, font: r.font, dot: r.dot }
 }
 
 fn nearest(palette: &[Rgb], c: Rgb) -> Rgb {
@@ -328,9 +359,10 @@ impl TextArt {
 
     fn pre_style(&self) -> String {
         format!(
-            "margin:0;padding:16px;background:{};color:{};font:16px/1 'JetBrains Mono','DejaVu Sans Mono',Menlo,Consolas,monospace;letter-spacing:0",
+            "margin:0;padding:16px;background:{};color:{};font:16px/1 {};letter-spacing:0",
             css(self.paper),
-            css(self.ink)
+            css(self.ink),
+            self.font.css().replace('\'', "\"")
         )
     }
 
@@ -354,8 +386,9 @@ impl TextArt {
         let (cw, ch) = (8usize, 16usize);
         let (w, h) = (self.cols * cw, self.rows * ch);
         let mut s = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">\n<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>\n<g font-family=\"JetBrains Mono, DejaVu Sans Mono, Menlo, Consolas, monospace\" font-size=\"14\" xml:space=\"preserve\">\n",
-            css(self.paper)
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">\n<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>\n<g font-family=\"{}\" font-size=\"14\" xml:space=\"preserve\">\n",
+            css(self.paper),
+            self.font.css()
         );
         for y in 0..self.rows {
             let mut x = 0;
@@ -409,13 +442,13 @@ impl TextArt {
     }
 
     /// The art drawn into exactly `w`×`h` pixels: braille dots as round
-    /// dots, blocks as solid quarters, characters from the display face's
-    /// own 8×16 bitmaps (nearest pixel). RGBA.
+    /// dots, blocks as solid quarters, characters in the art's font with
+    /// anti-aliased edges (so any size has even strokes). RGBA.
     pub fn raster_sized(&self, w: u32, h: u32) -> (u32, u32, Vec<u8>) {
         let (w, h) = (w.max(1), h.max(1));
         let mut out = vec![0u8; w as usize * h as usize * 4];
         let edge = |a: usize, n: usize, out: u32| (a as u64 * out as u64 / n.max(1) as u64) as u32;
-        let bitmaps: std::collections::HashMap<char, [u8; 16]> = crate::glyphs::GLYPHS.iter().copied().collect();
+
         let rgba = |c: Rgb| {
             let [r, g, b] = rgb8(c);
             [r, g, b, 255]
@@ -447,22 +480,22 @@ impl TextArt {
             } else if ('\u{2801}'..='\u{28FF}').contains(&cell.ch) {
                 let bits = cell.ch as u32 - 0x2800;
                 let dots = [(0, 0, 0x01), (0, 1, 0x02), (0, 2, 0x04), (1, 0, 0x08), (1, 1, 0x10), (1, 2, 0x20), (0, 3, 0x40), (1, 3, 0x80)];
-                let r = (cw as f32 / 2.).min(ch as f32 / 4.) * 0.36;
+                let r = (cw as f32 / 2.).min(ch as f32 / 4.) * 0.5 * self.dot.clamp(0.3, 1.);
                 for (dx, dy, bit) in dots {
                     if bits & bit != 0 {
                         let (cx, cy) = (x0 as f32 + (dx as f32 + 0.5) * cw as f32 / 2., y0 as f32 + (dy as f32 + 0.5) * ch as f32 / 4.);
                         fill((cx - r).floor() as u32, (cy - r).floor() as u32, (cx + r).ceil() as u32, (cy + r).ceil() as u32, ink, Some((cx, cy, r)));
                     }
                 }
-            } else if let Some(rows) = bitmaps.get(&cell.ch) {
+            } else if cell.ch != ' ' {
+                let paper = rgba(cell.bg.unwrap_or(self.paper));
+                let cover = self.font.coverage(cell.ch, cw, ch);
                 for y in 0..ch {
-                    let bits = rows[(y * 16 / ch.max(1)) as usize];
-                    if bits == 0 {
-                        continue;
-                    }
                     for x in 0..cw {
-                        if bits & (0x80 >> (x * 8 / cw.max(1))) != 0 {
-                            fill(x0 + x, y0 + y, x0 + x + 1, y0 + y + 1, ink, None);
+                        let c = cover[(y * cw + x) as usize];
+                        if c > 0.004 {
+                            let mix: [u8; 4] = std::array::from_fn(|i| (paper[i] as f32 + (ink[i] as f32 - paper[i] as f32) * c).round() as u8);
+                            fill(x0 + x, y0 + y, x0 + x + 1, y0 + y + 1, mix, None);
                         }
                     }
                 }
@@ -477,14 +510,17 @@ impl TextArt {
         crate::export::encode(w, h, px, crate::export::Format::Png, self.paper)
     }
 
-    /// A picture of the art in any format at `size` (SVG: real text).
-    pub fn image(&self, size: crate::export::Size, scale: u32, format: crate::export::Format) -> Result<Vec<u8>, String> {
+    /// A picture of the art in any format at `size`, in `frame` (SVG:
+    /// real text, unframed).
+    pub fn image(&self, size: crate::export::Size, frame: crate::export::Frame, scale: u32, format: crate::export::Format) -> Result<Vec<u8>, String> {
         if format == crate::export::Format::Svg {
             return Ok(self.svg().into_bytes());
         }
         let (nw, nh) = self.native();
-        let (w, h) = size.dims(nw, nh, scale);
-        let (w, h, px) = self.raster_sized(w, h);
+        let ((w, h), rect) = frame.canvas(nw, nh, size, scale);
+        let (_, _, px) = self.raster_sized(rect[2], rect[3]);
+        let [r, g, b] = rgb8(self.paper);
+        let px = crate::export::place(px, (w, h), rect, [r, g, b, 255]);
         crate::export::encode(w, h, px, format, self.paper)
     }
 }
@@ -538,7 +574,7 @@ mod tests {
     }
 
     fn make_with(r: &Recipe) -> TextArt {
-        make(&split(), r, Adjust::default(), &[PAPER, INK], PAPER, INK)
+        make(&split(), r, Adjust::default(), &[PAPER, INK], PAPER, INK, None)
     }
 
     #[test]
@@ -559,14 +595,14 @@ mod tests {
             assert_eq!(art.row(2)[15].ch, '█', "{g:?}");
         }
         // A quadrant straddling the edge is half on: the right column.
-        let narrow = make(&split(), &Recipe { ascii_cols: 1, ..recipe(Glyphs::Quadrants) }, Adjust::default(), &[PAPER, INK], PAPER, INK);
+        let narrow = make(&split(), &Recipe { ascii_cols: 1, ..recipe(Glyphs::Quadrants) }, Adjust::default(), &[PAPER, INK], PAPER, INK, None);
         assert_eq!(narrow.row(0)[0].ch, '▐');
     }
 
     #[test]
     fn colour_blocks_carry_two_colours() {
         let r = Recipe { glyphs: Glyphs::ColorBlocks, ascii_cols: 16, algo: Algo::Threshold, ..Recipe::default() };
-        let art = make(&split(), &r, Adjust::default(), &[[1., 0., 0.], [0., 0., 1.], [0., 0., 0.], [1., 1., 1.]], PAPER, INK);
+        let art = make(&split(), &r, Adjust::default(), &[[1., 0., 0.], [0., 0., 1.], [0., 0., 0.], [1., 1., 1.]], PAPER, INK, None);
         let cell = art.row(2)[15];
         assert_eq!((cell.ch, cell.fg, cell.bg), ('▀', Some([1., 1., 1.]), Some([1., 1., 1.])));
         assert_eq!(art.row(2)[0].fg, Some([0., 0., 0.]));
@@ -582,14 +618,14 @@ mod tests {
         let photo = make_with(&r);
         assert_eq!(photo.row(1)[15].fg, Some([1.; 3]));
         r.ascii_tint = Tint::Palette;
-        let pal = make(&split(), &r, Adjust::default(), &[[0.9, 0.1, 0.1], [0.1, 0.1, 0.1]], PAPER, INK);
+        let pal = make(&split(), &r, Adjust::default(), &[[0.9, 0.1, 0.1], [0.1, 0.1, 0.1]], PAPER, INK, None);
         assert_eq!(pal.row(1)[15].fg, Some([0.9, 0.1, 0.1]));
     }
 
     #[test]
     fn exports() {
         let r = Recipe { glyphs: Glyphs::ColorBlocks, ascii_cols: 8, algo: Algo::Threshold, ..Recipe::default() };
-        let art = make(&split(), &r, Adjust::default(), &[[0., 0., 0.], [1., 1., 1.]], PAPER, INK);
+        let art = make(&split(), &r, Adjust::default(), &[[0., 0., 0.], [1., 1., 1.]], PAPER, INK, None);
         let text = art.text();
         assert_eq!(text.lines().count(), art.rows);
         let ansi = art.ansi();
@@ -604,7 +640,7 @@ mod tests {
 
     #[test]
     fn html_escapes_markup() {
-        let art = TextArt { cols: 3, rows: 1, cells: "<&>".chars().map(|ch| Cell { ch, fg: None, bg: None }).collect(), ink: INK, paper: PAPER };
+        let art = TextArt { cols: 3, rows: 1, cells: "<&>".chars().map(|ch| Cell { ch, fg: None, bg: None }).collect(), ink: INK, paper: PAPER, font: Font::Vga, dot: 0.72 };
         assert!(art.html("x").contains("&lt;&amp;&gt;"));
         assert!(art.svg().contains("&lt;&amp;&gt;"));
         // The film keeps the entities; only markup '<' is escaped for the script.
@@ -615,7 +651,7 @@ mod tests {
     #[test]
     fn rasters_blocks_and_braille() {
         let cells = vec![Cell { ch: '▐', fg: None, bg: None }, Cell { ch: '\u{2801}', fg: Some([1., 0., 0.]), bg: None }, Cell { ch: '▀', fg: None, bg: Some([0., 0., 1.]) }];
-        let art = TextArt { cols: 3, rows: 1, cells, ink: INK, paper: PAPER };
+        let art = TextArt { cols: 3, rows: 1, cells, ink: INK, paper: PAPER, font: Font::Vga, dot: 0.72 };
         assert!(art.is_drawable());
         let (w, h, px) = art.raster(1);
         assert_eq!((w, h), (24, 16));
@@ -627,13 +663,13 @@ mod tests {
         // ▀ with a blue background: ink above, blue below.
         assert_eq!((at(20, 3), at(20, 12)), ([255, 255, 255, 255], [0, 0, 255, 255]));
         assert!(image::load_from_memory(&art.png(2).unwrap()).is_ok());
-        let letters = TextArt { cols: 1, rows: 1, cells: vec![Cell { ch: 'A', fg: None, bg: None }], ink: INK, paper: PAPER };
+        let letters = TextArt { cols: 1, rows: 1, cells: vec![Cell { ch: 'A', fg: None, bg: None }], ink: INK, paper: PAPER, font: Font::Vga, dot: 0.72 };
         assert!(!letters.is_drawable());
     }
 
     #[test]
     fn rasters_characters_from_the_font() {
-        let letters = TextArt { cols: 2, rows: 1, cells: "A ".chars().map(|ch| Cell { ch, fg: None, bg: None }).collect(), ink: INK, paper: PAPER };
+        let letters = TextArt { cols: 2, rows: 1, cells: "A ".chars().map(|ch| Cell { ch, fg: None, bg: None }).collect(), ink: INK, paper: PAPER, font: Font::Vga, dot: 0.72 };
         let (w, _, px) = letters.raster(1);
         let ink = |x0: u32, x1: u32| (x0..x1).flat_map(|x| (0..16).map(move |y| (x, y))).filter(|&(x, y)| px[((y * w + x) * 4) as usize] == 255).count();
         // 'A' has ink; the space has none.
@@ -643,7 +679,7 @@ mod tests {
         assert_eq!((sw, sh), (37, 29));
         assert!(big.as_chunks::<4>().0.iter().any(|p| p[0] == 255));
         for f in crate::export::Format::ALL {
-            assert!(letters.image(crate::export::Size::Long(320), 1, f).is_ok(), "{f:?}");
+            assert!(letters.image(crate::export::Size::Long(320), crate::export::Frame::default(), 1, f).is_ok(), "{f:?}");
         }
     }
 

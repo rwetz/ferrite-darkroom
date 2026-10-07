@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use crate::batch::Job;
-use crate::export::Size;
+use crate::export::{Frame, Size};
 use crate::recipe::Recipe;
 use crate::settings::Settings;
 
@@ -34,6 +34,8 @@ Options:
   --size SIZE       how big pictures come out: a long edge in pixels (3000),
                     720p 1080p 1440p 4k 5k 8k, or scale (the recipe's pixel
                     size, the default); at most 8192
+  --frame FRAME     the picture's shape: 16:9 (the photo cropped to it), 16:9-fit
+                    (the whole photo, padded with paper), 21:9, 9:16, 1:1, …
   --scheme KEY      the scheme for the Scheme palette: ferrite mono graphite slate
                     concrete harbor cyanotype phosphor verdigris bruise
   --light, --dark   the scheme's appearance
@@ -53,6 +55,7 @@ struct Opts {
     recipe: Option<PathBuf>,
     mask: Option<PathBuf>,
     size: Option<Size>,
+    frame: Option<Frame>,
     scheme: Option<String>,
     light: Option<bool>,
 }
@@ -71,6 +74,10 @@ fn parse(args: &[String]) -> Result<Option<Command>, String> {
             "--size" => {
                 let v = value(&mut it, arg)?;
                 opts.size = Some(Size::parse(&v).ok_or(format!("--size {v}: use pixels (3000), 1080p, 4k, 8k or scale"))?);
+            }
+            "--frame" => {
+                let v = value(&mut it, arg)?;
+                opts.frame = Some(Frame::parse(&v).ok_or(format!("--frame {v}: use a ratio like 16:9 or 16:9-fit, or photo"))?);
             }
             "--scheme" => opts.scheme = Some(value(&mut it, arg)?),
             "--light" => opts.light = Some(true),
@@ -93,13 +100,20 @@ fn parse(args: &[String]) -> Result<Option<Command>, String> {
 fn job(opts: &Opts) -> Result<Job, String> {
     let settings = Settings::load();
     let recipe = match &opts.recipe {
-        Some(path) => Recipe::from_toml(&std::fs::read_to_string(path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?)?,
+        Some(path) => {
+            let src = std::fs::read_to_string(path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+            for warning in Recipe::check(&src) {
+                eprintln!("darkroom: {}: {warning}", path.display());
+            }
+            Recipe::from_toml(&src)?
+        }
         None => settings.recipe.clone(),
     };
     let scheme = opts.scheme.clone().unwrap_or(settings.scheme);
     let light = opts.light.unwrap_or(settings.appearance == "light");
     let mut job = Job::with_scheme(recipe, &scheme, light);
     job.size = opts.size.unwrap_or(Size::Scale);
+    job.frame = opts.frame.unwrap_or_default();
     if let Some(path) = &opts.mask {
         let img = image::open(path).map_err(|e| format!("couldn't read the mask {}: {e}", path.display()))?.to_luma8();
         job.paint = Some(crate::mask::Paint::from_image(&img, img.width(), img.height()));
@@ -188,7 +202,7 @@ mod tests {
             Command::File {
                 input: "in.gif".into(),
                 output: "out.gif".into(),
-                opts: Opts { recipe: Some("gb.toml".into()), mask: None, size: None, scheme: Some("phosphor".into()), light: Some(true) }
+                opts: Opts { recipe: Some("gb.toml".into()), mask: None, size: None, frame: None, scheme: Some("phosphor".into()), light: Some(true) }
             }
         );
     }
