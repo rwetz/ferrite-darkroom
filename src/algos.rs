@@ -272,8 +272,8 @@ pub fn stipple(level: &[f32], w: u32, h: u32, seed: u32) -> Vec<bool> {
             grid[(py / cell) as usize * gw + (px / cell) as usize].push(k);
         }
         let mut acc = vec![(0f32, 0f32, 0f32); points.len()];
-        for i in 0..n {
-            if level[i] <= 0. {
+        for (i, &weight) in level.iter().enumerate() {
+            if weight <= 0. {
                 continue;
             }
             let (x, y) = ((i as u32 % w) as f32 + 0.5, (i as u32 / w) as f32 + 0.5);
@@ -299,7 +299,7 @@ pub fn stipple(level: &[f32], w: u32, h: u32, seed: u32) -> Vec<bool> {
             }
             if best.0 != usize::MAX {
                 let a = &mut acc[best.0];
-                *a = (a.0 + x * level[i], a.1 + y * level[i], a.2 + level[i]);
+                *a = (a.0 + x * weight, a.1 + y * weight, a.2 + weight);
             }
         }
         for (p, a) in points.iter_mut().zip(&acc) {
