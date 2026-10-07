@@ -153,15 +153,15 @@ pub fn rgba(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
         for y in 0..h {
             let row = &art.index[((y / cell) * art.w) as usize..][..art.w as usize];
             let line = &mut out[(y * w * 4) as usize..][..(w * 4) as usize];
-            for (x, px) in line.chunks_exact_mut(4).enumerate() {
-                px.copy_from_slice(&ink_of(row[x / cell as usize]));
+            for (x, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                *px = ink_of(row[x / cell as usize]);
             }
         }
         return (w, h, out);
     }
 
-    for px in out.chunks_exact_mut(4) {
-        px.copy_from_slice(&paper_px);
+    for px in out.as_chunks_mut::<4>().0 {
+        *px = paper_px;
     }
     // The lattice is drawn in the colour furthest from the paper.
     let paper_l = oklab(art.colors[paper])[0];
@@ -211,7 +211,7 @@ pub fn rgba(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
 /// The same pixels as BGRA, for a GPU texture.
 pub fn bgra(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
     let (w, h, mut px) = rgba(art, cell, look);
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         p.swap(0, 2);
     }
     (w, h, px)
@@ -278,7 +278,7 @@ mod tests {
     fn shapes_differ() {
         let ink_count = |shape| {
             let (_, _, px) = rgba(&art(), 12, Look { shape, gutter: 0.1, ..Look::default() });
-            px.chunks_exact(4).filter(|p| p[0] == 255).count()
+            px.as_chunks::<4>().0.iter().filter(|p| p[0] == 255).count()
         };
         let (sq, ci, di, pl) = (ink_count(Shape::Square), ink_count(Shape::Circle), ink_count(Shape::Diamond), ink_count(Shape::Plus));
         // Areas: square 4r², circle πr², plus 20r²/9, diamond 2r².
@@ -300,7 +300,7 @@ mod tests {
         let mut weak = art();
         weak.lum = vec![0., 0.3];
         let look = Look { shape: Shape::Square, modulate: true, ..Look::default() };
-        let ink = |a: &Art| rgba(a, 10, look).2.chunks_exact(4).filter(|p| p[0] == 255).count();
+        let ink = |a: &Art| rgba(a, 10, look).2.as_chunks::<4>().0.iter().filter(|p| p[0] == 255).count();
         assert!(ink(&weak) < ink(&art()));
     }
 
