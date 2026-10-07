@@ -391,17 +391,31 @@ fn block_bits(ch: char) -> Option<u8> {
 impl TextArt {
     /// Whether every glyph is braille, a block or a space: art that can be
     /// drawn exactly as pixels without a font.
+    #[cfg(test)]
     pub fn is_drawable(&self) -> bool {
         self.cells.iter().all(|c| c.ch == ' ' || block_bits(c.ch).is_some() || ('\u{2801}'..='\u{28FF}').contains(&c.ch))
     }
 
-    /// Braille and block art drawn as pixels: cells of 8×16 × `scale`,
-    /// braille dots as round dots, blocks as solid quarters. RGBA.
+    /// The art's size at one pixel per glyph pixel: 8×16 a cell.
+    pub fn native(&self) -> (u32, u32) {
+        (self.cols as u32 * 8, self.rows as u32 * 16)
+    }
+
+    /// The art drawn as pixels: cells of 8×16 × `scale`. RGBA.
+    #[cfg(test)]
     pub fn raster(&self, scale: u32) -> (u32, u32, Vec<u8>) {
-        let scale = scale.max(1);
-        let (cw, ch) = (8 * scale, 16 * scale);
-        let (w, h) = (self.cols as u32 * cw, self.rows as u32 * ch);
-        let mut out = vec![0u8; (w * h * 4) as usize];
+        let (w, h) = self.native();
+        self.raster_sized(w * scale.max(1), h * scale.max(1))
+    }
+
+    /// The art drawn into exactly `w`×`h` pixels: braille dots as round
+    /// dots, blocks as solid quarters, characters from the display face's
+    /// own 8×16 bitmaps (nearest pixel). RGBA.
+    pub fn raster_sized(&self, w: u32, h: u32) -> (u32, u32, Vec<u8>) {
+        let (w, h) = (w.max(1), h.max(1));
+        let mut out = vec![0u8; w as usize * h as usize * 4];
+        let edge = |a: usize, n: usize, out: u32| (a as u64 * out as u64 / n.max(1) as u64) as u32;
+        let bitmaps: std::collections::HashMap<char, [u8; 16]> = crate::glyphs::GLYPHS.iter().copied().collect();
         let rgba = |c: Rgb| {
             let [r, g, b] = rgb8(c);
             [r, g, b, 255]
@@ -414,12 +428,14 @@ impl TextArt {
                     {
                         continue;
                     }
-                    out[((y * w + x) * 4) as usize..][..4].copy_from_slice(&c);
+                    out[(y as usize * w as usize + x as usize) * 4..][..4].copy_from_slice(&c);
                 }
             }
         };
         for (i, cell) in self.cells.iter().enumerate() {
-            let (x0, y0) = ((i % self.cols) as u32 * cw, (i / self.cols) as u32 * ch);
+            let (col, row) = (i % self.cols, i / self.cols);
+            let (x0, y0) = (edge(col, self.cols, w), edge(row, self.rows, h));
+            let (cw, ch) = (edge(col + 1, self.cols, w) - x0, edge(row + 1, self.rows, h) - y0);
             fill(x0, y0, x0 + cw, y0 + ch, rgba(cell.bg.unwrap_or(self.paper)), None);
             let ink = rgba(cell.fg.unwrap_or(self.ink));
             if let Some(bits) = block_bits(cell.ch) {
@@ -438,17 +454,38 @@ impl TextArt {
                         fill((cx - r).floor() as u32, (cy - r).floor() as u32, (cx + r).ceil() as u32, (cy + r).ceil() as u32, ink, Some((cx, cy, r)));
                     }
                 }
+            } else if let Some(rows) = bitmaps.get(&cell.ch) {
+                for y in 0..ch {
+                    let bits = rows[(y * 16 / ch.max(1)) as usize];
+                    if bits == 0 {
+                        continue;
+                    }
+                    for x in 0..cw {
+                        if bits & (0x80 >> (x * 8 / cw.max(1))) != 0 {
+                            fill(x0 + x, y0 + y, x0 + x + 1, y0 + y + 1, ink, None);
+                        }
+                    }
+                }
             }
         }
         (w, h, out)
     }
 
+    #[cfg(test)]
     pub fn png(&self, scale: u32) -> Result<Vec<u8>, String> {
         let (w, h, px) = self.raster(scale);
-        let img = image::RgbaImage::from_raw(w, h, px).ok_or("size mismatch")?;
-        let mut out = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-        Ok(out.into_inner())
+        crate::export::encode(w, h, px, crate::export::Format::Png, self.paper)
+    }
+
+    /// A picture of the art in any format at `size` (SVG: real text).
+    pub fn image(&self, size: crate::export::Size, scale: u32, format: crate::export::Format) -> Result<Vec<u8>, String> {
+        if format == crate::export::Format::Svg {
+            return Ok(self.svg().into_bytes());
+        }
+        let (nw, nh) = self.native();
+        let (w, h) = size.dims(nw, nh, scale);
+        let (w, h, px) = self.raster_sized(w, h);
+        crate::export::encode(w, h, px, format, self.paper)
     }
 }
 
@@ -592,6 +629,22 @@ mod tests {
         assert!(image::load_from_memory(&art.png(2).unwrap()).is_ok());
         let letters = TextArt { cols: 1, rows: 1, cells: vec![Cell { ch: 'A', fg: None, bg: None }], ink: INK, paper: PAPER };
         assert!(!letters.is_drawable());
+    }
+
+    #[test]
+    fn rasters_characters_from_the_font() {
+        let letters = TextArt { cols: 2, rows: 1, cells: "A ".chars().map(|ch| Cell { ch, fg: None, bg: None }).collect(), ink: INK, paper: PAPER };
+        let (w, _, px) = letters.raster(1);
+        let ink = |x0: u32, x1: u32| (x0..x1).flat_map(|x| (0..16).map(move |y| (x, y))).filter(|&(x, y)| px[((y * w + x) * 4) as usize] == 255).count();
+        // 'A' has ink; the space has none.
+        assert!(ink(0, 8) > 20 && ink(8, 16) == 0);
+        // Any size: 8K-style odd sizes keep the glyph.
+        let (sw, sh, big) = letters.raster_sized(37, 29);
+        assert_eq!((sw, sh), (37, 29));
+        assert!(big.as_chunks::<4>().0.iter().any(|p| p[0] == 255));
+        for f in crate::export::Format::ALL {
+            assert!(letters.image(crate::export::Size::Long(320), 1, f).is_ok(), "{f:?}");
+        }
     }
 
     #[test]

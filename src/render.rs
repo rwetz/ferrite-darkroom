@@ -8,6 +8,7 @@
 //! art. Pure, so the preview and the PNG export draw identical pixels.
 
 use crate::engine::{Rgb, oklab};
+use crate::export::{self, Format, Size};
 use crate::studio::{Art, Print};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -161,23 +162,82 @@ fn rgba8(c: Rgb) -> [u8; 4] {
     [r, g, b, 255]
 }
 
+/// One art pixel's mark: its colour (and palette index), its shape, and
+/// its radius as a share of half the cell (1 = touching the cell's edges).
+struct Mark {
+    color: [u8; 4],
+    index: usize,
+    shape: Shape,
+    r: f32,
+}
+
+/// Every art pixel's mark in reading order (`None`: bare paper), and the
+/// paper's index. The raster and the SVG both draw from these.
+fn marks(art: &Art, look: Look) -> (usize, Vec<Option<Mark>>) {
+    let lut: Vec<[u8; 4]> = art.colors.iter().map(|&c| rgba8(c)).collect();
+    let paper = paper_index(&art.colors, look.paper);
+    let ink_of = |i: usize| if look.transparent && i == paper { [0; 4] } else { lut[i] };
+    let layered = !art.layer.is_empty();
+    // The lattice is drawn in the colour furthest from the paper.
+    let paper_l = oklab(art.colors[paper])[0];
+    let contrast = (0..art.colors.len()).max_by(|&a, &b| {
+        let d = |i: usize| (oklab(art.colors[i])[0] - paper_l).abs();
+        d(a).total_cmp(&d(b))
+    });
+    let color_l: Vec<f32> = art.colors.iter().map(|&c| oklab(c)[0]).collect();
+    let marks = (0..art.index.len())
+        .map(|at| {
+            let i = art.index[at] as usize;
+            let cl = if layered && art.layer[at] == 1 { look.bg } else { look.cells };
+            if i == paper {
+                return match contrast {
+                    Some(c) if cl.lattice > 0. && c != paper => Some(Mark { color: lut[c], index: c, shape: cl.shape, r: cl.lattice.clamp(0., 1.) }),
+                    _ => None,
+                };
+            }
+            let mut r = 1. - cl.gutter.clamp(0., 0.9);
+            if cl.modulate {
+                // How much of this colour the photo had here, as area.
+                let span = (color_l[i] - paper_l).abs().max(0.05);
+                let level = ((art.lum[at] - paper_l).abs() / span).clamp(0.15, 1.);
+                r *= level.sqrt();
+            }
+            Some(Mark { color: ink_of(i), index: i, shape: cl.shape, r })
+        })
+        .collect();
+    (paper, marks)
+}
+
 /// Draw `art` at `cell` pixels per art pixel. Returns `(w, h, rgba)`.
 pub fn rgba(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
     let cell = cell.max(1);
-    let (w, h) = (art.w * cell, art.h * cell);
+    rgba_sized(art, art.w * cell, art.h * cell, look)
+}
+
+/// Draw `art` into exactly `w`×`h` pixels. Cells take whole pixels, so at a
+/// size that isn't a multiple of the art some are a pixel wider than
+/// others; shapes stay hard-edged. Returns `(w, h, rgba)`.
+pub fn rgba_sized(art: &Art, w: u32, h: u32, look: Look) -> (u32, u32, Vec<u8>) {
+    let (w, h) = (w.max(1), h.max(1));
     let lut: Vec<[u8; 4]> = art.colors.iter().map(|&c| rgba8(c)).collect();
     let paper = paper_index(&art.colors, look.paper);
     let paper_px = if look.transparent { [0; 4] } else { lut[paper] };
-    let ink_of = |i: u8| if look.transparent && i as usize == paper { [0; 4] } else { lut[i as usize] };
+    // Where art pixel `a` of `n` starts, `out` pixels across.
+    let edge = |a: u32, n: u32, out: u32| (a as u64 * out as u64 / n as u64) as u32;
 
-    let mut out = vec![0u8; (w * h * 4) as usize];
+    let mut out = vec![0u8; w as usize * h as usize * 4];
     let layered = !art.layer.is_empty();
     if look.cells.is_plain() && (!layered || look.bg.is_plain()) {
+        let ink_of = |i: u8| if look.transparent && i as usize == paper { [0; 4] } else { lut[i as usize] };
+        // Which art pixel each output pixel falls in, cut where the cells are.
+        let spans = |n: u32, out: u32| -> Vec<u32> { (0..n).flat_map(|a| std::iter::repeat_n(a, (edge(a + 1, n, out) - edge(a, n, out)) as usize)).collect() };
+        let (cols, rows) = (spans(art.w, w), spans(art.h, h));
         for y in 0..h {
-            let row = &art.index[((y / cell) * art.w) as usize..][..art.w as usize];
-            let line = &mut out[(y * w * 4) as usize..][..(w * 4) as usize];
+            let ay = rows[y as usize];
+            let row = &art.index[(ay * art.w) as usize..][..art.w as usize];
+            let line = &mut out[y as usize * w as usize * 4..][..w as usize * 4];
             for (x, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                *px = ink_of(row[x / cell as usize]);
+                *px = ink_of(row[cols[x] as usize]);
             }
         }
         return (w, h, out);
@@ -186,49 +246,86 @@ pub fn rgba(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
     for px in out.as_chunks_mut::<4>().0 {
         *px = paper_px;
     }
-    // The lattice is drawn in the colour furthest from the paper.
-    let paper_l = oklab(art.colors[paper])[0];
-    let contrast = (0..art.colors.len()).max_by(|&a, &b| {
-        let d = |i: usize| (oklab(art.colors[i])[0] - paper_l).abs();
-        d(a).total_cmp(&d(b))
-    });
-    let color_l: Vec<f32> = art.colors.iter().map(|&c| oklab(c)[0]).collect();
-    let half = cell as f32 / 2.;
-
+    let (_, marks) = marks(art, look);
     for ay in 0..art.h {
+        let (y0, y1) = (edge(ay, art.h, h), edge(ay + 1, art.h, h));
         for ax in 0..art.w {
-            let at = (ay * art.w + ax) as usize;
-            let i = art.index[at] as usize;
-            let cl = if layered && art.layer[at] == 1 { look.bg } else { look.cells };
-            let (color, r) = if i == paper {
-                match contrast {
-                    Some(c) if cl.lattice > 0. && c != paper => (lut[c], half * cl.lattice.clamp(0., 1.)),
-                    _ => continue,
-                }
-            } else {
-                let mut r = half * (1. - cl.gutter.clamp(0., 0.9));
-                if cl.modulate {
-                    // How much of this colour the photo had here, as area.
-                    let span = (color_l[i] - paper_l).abs().max(0.05);
-                    let level = ((art.lum[at] - paper_l).abs() / span).clamp(0.15, 1.);
-                    r *= level.sqrt();
-                }
-                (ink_of(i as u8), r)
-            };
-            for cy in 0..cell {
-                let dy = cy as f32 + 0.5 - half;
-                let row = ((ay * cell + cy) * w + ax * cell) as usize * 4;
-                for cx in 0..cell {
-                    let dx = cx as f32 + 0.5 - half;
+            let Some(m) = &marks[(ay * art.w + ax) as usize] else { continue };
+            let (x0, x1) = (edge(ax, art.w, w), edge(ax + 1, art.w, w));
+            let (half_w, half_h) = ((x1 - x0) as f32 / 2., (y1 - y0) as f32 / 2.);
+            let r = half_w.min(half_h) * m.r;
+            for y in y0..y1 {
+                let dy = (y - y0) as f32 + 0.5 - half_h;
+                let row = y as usize * w as usize * 4;
+                for x in x0..x1 {
+                    let dx = (x - x0) as f32 + 0.5 - half_w;
                     // The centre pixel always draws, so 1× and 2× keep their pixels.
-                    if cl.shape.contains(dx, dy, r) || (dx.abs() < 0.5 && dy.abs() < 0.5) {
-                        out[row + cx as usize * 4..][..4].copy_from_slice(&color);
+                    if m.shape.contains(dx, dy, r) || (dx.abs() < 0.5 && dy.abs() < 0.5) {
+                        out[row + x as usize * 4..][..4].copy_from_slice(&m.color);
                     }
                 }
             }
         }
     }
     (w, h, out)
+}
+
+/// The print as an SVG `w`×`h` pixels big, drawn in art-pixel units with
+/// one path per colour, so it stays sharp at any size.
+pub fn svg(art: &Art, w: u32, h: u32, look: Look) -> String {
+    use std::fmt::Write as _;
+    let hex = |c: [u8; 4]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+    let num = |v: f32| {
+        let t = format!("{v:.3}");
+        t.trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    let (paper, marks) = marks(art, look);
+    let mut s = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {} {}\" preserveAspectRatio=\"none\">\n",
+        art.w, art.h
+    );
+    if !look.transparent {
+        let _ = writeln!(s, "<rect width=\"{}\" height=\"{}\" fill=\"{}\"/>", art.w, art.h, hex(rgba8(art.colors[paper])));
+    }
+    let full = |m: &Mark| m.shape == Shape::Square && m.r >= 1.;
+    let mut paths = vec![String::new(); art.colors.len()];
+    for ay in 0..art.h {
+        let mut ax = 0;
+        while ax < art.w {
+            let at = (ay * art.w + ax) as usize;
+            let Some(m) = marks[at].as_ref().filter(|m| m.color[3] > 0) else {
+                ax += 1;
+                continue;
+            };
+            let d = &mut paths[m.index];
+            if full(m) {
+                // A run of full squares in one colour is one rectangle.
+                let mut end = ax + 1;
+                while end < art.w && marks[at + (end - ax) as usize].as_ref().is_some_and(|o| o.index == m.index && full(o)) {
+                    end += 1;
+                }
+                let _ = write!(d, "M{ax} {ay}h{}v1h-{}z", end - ax, end - ax);
+                ax = end;
+                continue;
+            }
+            let (cx, cy, r) = (ax as f32 + 0.5, ay as f32 + 0.5, 0.5 * m.r);
+            let _ = match m.shape {
+                Shape::Square => write!(d, "M{} {}h{d2}v{d2}h-{d2}z", num(cx - r), num(cy - r), d2 = num(2. * r)),
+                Shape::Circle => write!(d, "M{} {}a{r} {r} 0 1 0 {d2} 0a{r} {r} 0 1 0 -{d2} 0z", num(cx - r), num(cy), r = num(r), d2 = num(2. * r)),
+                Shape::Diamond => write!(d, "M{} {}l{r} {r}l-{r} {r}l-{r} -{r}z", num(cx), num(cy - r), r = num(r)),
+                Shape::Plus => {
+                    let (t, l) = (num(2. * r / 3.), num(2. * r));
+                    write!(d, "M{} {}h{t}v{l}h-{t}zM{} {}h{l}v{t}h-{l}z", num(cx - r / 3.), num(cy - r), num(cx - r), num(cy - r / 3.))
+                }
+            };
+            ax += 1;
+        }
+    }
+    for (i, d) in paths.iter().enumerate().filter(|(_, d)| !d.is_empty()) {
+        let _ = writeln!(s, "<path fill=\"{}\" d=\"{d}\"/>", hex(rgba8(art.colors[i])));
+    }
+    s.push_str("</svg>\n");
+    s
 }
 
 /// The same pixels as BGRA, for a GPU texture.
@@ -241,12 +338,21 @@ pub fn bgra(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
 }
 
 /// A PNG at `scale` pixels per art pixel; transparent paper keeps alpha.
+#[cfg(test)]
 pub fn png(art: &Art, scale: u32, look: Look) -> Result<Vec<u8>, String> {
     let (w, h, px) = rgba(art, scale, look);
-    let img = image::RgbaImage::from_raw(w, h, px).ok_or("image size mismatch")?;
-    let mut out = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-    Ok(out.into_inner())
+    export::encode(w, h, px, Format::Png, [1.; 3])
+}
+
+/// A still in any format at `size`. Formats without alpha lay transparent
+/// paper on the paper colour.
+pub fn still(art: &Art, size: Size, scale: u32, format: Format, look: Look) -> Result<Vec<u8>, String> {
+    let (w, h) = size.dims(art.w, art.h, scale);
+    if format == Format::Svg {
+        return Ok(svg(art, w, h, look).into_bytes());
+    }
+    let (w, h, px) = rgba_sized(art, w, h, look);
+    export::encode(w, h, px, format, art.colors[paper_index(&art.colors, look.paper)])
 }
 
 /// The untouched photo at the art's size, BGRA at `cell`: the "before".
@@ -363,6 +469,43 @@ mod tests {
         let look = Look::of(Cells { shape: Shape::Plus, gutter: 0.8, ..Cells::default() });
         let (_, _, px) = rgba(&art(), 1, look);
         assert_eq!(px, vec![0, 0, 0, 255, 255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn sized_matches_whole_cells() {
+        let look = Look::of(Cells { shape: Shape::Circle, gutter: 0.3, modulate: true, lattice: 0.2 });
+        assert_eq!(rgba(&art(), 6, look), rgba_sized(&art(), 12, 6, look));
+    }
+
+    #[test]
+    fn sized_fills_odd_sizes() {
+        // Two art pixels across seven: cells of three and four.
+        let (w, h, px) = rgba_sized(&art(), 7, 3, Look::default());
+        assert_eq!((w, h), (7, 3));
+        assert_eq!(at(&px, w, 2, 1), [0, 0, 0, 255]);
+        assert_eq!(at(&px, w, 3, 1), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn svg_draws_each_colour() {
+        let s = svg(&art(), 200, 100, Look::default());
+        assert!(s.contains("width=\"200\"") && s.contains("viewBox=\"0 0 2 1\""));
+        assert!(s.contains("<rect width=\"2\" height=\"1\" fill=\"#000000\"/>"));
+        assert!(s.contains("<path fill=\"#ffffff\" d=\"M1 0h1v1h-1z\"/>"), "{s}");
+        let dots = svg(&art(), 20, 10, Look::of(Cells { shape: Shape::Circle, gutter: 0.5, ..Cells::default() }));
+        assert!(dots.contains("a0.25 0.25"), "{dots}");
+        assert!(!svg(&art(), 2, 1, Look { transparent: true, ..Look::default() }).contains("<rect"));
+    }
+
+    #[test]
+    fn stills_in_every_format() {
+        for f in Format::ALL {
+            let bytes = still(&art(), Size::Long(64), 1, f, Look::default()).unwrap();
+            if f != Format::Svg {
+                let img = image::load_from_memory(&bytes).unwrap();
+                assert_eq!((img.width(), img.height()), (64, 32), "{f:?}");
+            }
+        }
     }
 
     #[test]
