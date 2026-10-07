@@ -1,26 +1,38 @@
-//! The darkroom's process, all pure: a photo becomes a grey working print,
-//! the print is adjusted, then it's developed either as dither (Ferrite's
-//! own Bayer, blue-noise and Atkinson masks) or as ASCII (Ferrite's glyph-
-//! fitted character sets). Preview and export run the same code, so what
-//! you see is what you save.
+//! The darkroom's process, all pure: a photo becomes a colour working print,
+//! the print is adjusted, then it's developed either as dither (the
+//! [`engine`](crate::engine), into any palette) or as ASCII (Ferrite's
+//! glyph-fitted character sets). Preview and export run the same code, so
+//! what you see is what you save.
 
 use std::path::Path;
 
 use ferrite_design::ascii::{self, ArtStyle, Charset, Fit};
-use ferrite_design::dither::{self, Pattern, Picture};
+use ferrite_design::dither::Picture;
+
+use crate::engine::{self, Params, Rgb};
 
 /// The working print is at most this wide; more detail than any export uses.
 const WORK_W: u32 = 960;
 
-/// A greyscale image, 0 = black, 1 = white.
+/// The working print: sRGB colour plus its luminance (0 = black, 1 = white).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Print {
     pub w: u32,
     pub h: u32,
+    pub rgb: Vec<Rgb>,
     pub lum: Vec<f32>,
 }
 
+fn luminance([r, g, b]: Rgb) -> f32 {
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
 impl Print {
+    pub fn from_rgb(w: u32, h: u32, rgb: Vec<Rgb>) -> Print {
+        let lum = rgb.iter().map(|&c| luminance(c)).collect();
+        Print { w, h, rgb, lum }
+    }
+
     pub fn aspect(&self) -> f32 {
         self.h as f32 / self.w.max(1) as f32
     }
@@ -29,22 +41,24 @@ impl Print {
     pub fn resize(&self, w: u32, h: u32) -> Print {
         let (w, h) = (w.max(1), h.max(1));
         let (sx, sy) = (self.w as f32 / w as f32, self.h as f32 / h as f32);
-        let mut lum = Vec::with_capacity((w * h) as usize);
+        let mut rgb = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             let (y0, y1) = ((y as f32 * sy) as u32, (((y + 1) as f32 * sy).ceil() as u32).clamp(1, self.h));
             for x in 0..w {
                 let (x0, x1) = ((x as f32 * sx) as u32, (((x + 1) as f32 * sx).ceil() as u32).clamp(1, self.w));
-                let (mut sum, mut n) = (0f32, 0f32);
+                let (mut sum, mut n) = ([0f32; 3], 0f32);
                 for yy in y0.min(y1 - 1)..y1 {
                     for xx in x0.min(x1 - 1)..x1 {
-                        sum += self.lum[(yy * self.w + xx) as usize];
+                        let c = self.rgb[(yy * self.w + xx) as usize];
+                        sum = [sum[0] + c[0], sum[1] + c[1], sum[2] + c[2]];
                         n += 1.;
                     }
                 }
-                lum.push(sum / n.max(1.));
+                let n = n.max(1.);
+                rgb.push([sum[0] / n, sum[1] / n, sum[2] / n]);
             }
         }
-        Print { w, h, lum }
+        Print::from_rgb(w, h, rgb)
     }
 }
 
@@ -55,20 +69,21 @@ pub fn load(path: &Path) -> Result<Print, String> {
         image::ImageError::IoError(e) => e.to_string(),
         e => format!("couldn't read the image: {e}"),
     })?;
-    let luma = img.to_luma8();
-    let (w, h) = luma.dimensions();
+    let img = img.to_rgb8();
+    let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
         return Err("the image is empty".into());
     }
-    let print = Print { w, h, lum: luma.as_raw().iter().map(|&v| v as f32 / 255.).collect() };
+    let print = Print::from_rgb(w, h, img.pixels().map(|p| p.0.map(|c| c as f32 / 255.)).collect());
     Ok(if w > WORK_W { print.resize(WORK_W, ((h as f32 / w as f32) * WORK_W as f32).round() as u32) } else { print })
 }
 
 /// A test print to work on before you've brought a photo: a lit sphere on
-/// a horizon under a low sun — smooth ramps and hard edges both.
+/// a horizon under a low sun — smooth ramps, hard edges, and some colour
+/// for the palettes to find.
 pub fn sample() -> Print {
     let (w, h) = (640u32, 400u32);
-    let lum = (0..h)
+    let rgb = (0..h)
         .flat_map(|y| (0..w).map(move |x| (x as f32 / w as f32, y as f32 / h as f32)))
         .map(|(u, v)| {
             let horizon = 0.62;
@@ -76,13 +91,20 @@ pub fn sample() -> Print {
             let (sun_u, sun_v) = (0.76, 0.5);
             let d_sun = ((u - sun_u).powi(2) + ((v - sun_v) * 0.62).powi(2)).sqrt();
             let glow = (-d_sun * 7.).exp();
-            let mut l = if v < horizon { 0.06 + 0.3 * v / horizon + 0.6 * glow } else { 0.1 + 0.2 * (1. - (v - horizon) / (1. - horizon)) };
-            if d_sun < 0.05 && v < horizon {
+            let sky = v < horizon;
+            let sun = d_sun < 0.05 && sky;
+            let mut l = if sky { 0.06 + 0.3 * v / horizon + 0.6 * glow } else { 0.1 + 0.2 * (1. - (v - horizon) / (1. - horizon)) };
+            if sun {
                 l = 1.;
             }
             // Ground stripes running to the horizon.
-            if v >= horizon && (((u - 0.5) / (v - horizon + 0.05)) * 2.).rem_euclid(1.) < 0.12 {
+            if !sky && (((u - 0.5) / (v - horizon + 0.05)) * 2.).rem_euclid(1.) < 0.12 {
                 l += 0.18;
+            }
+            // Tint: a blue sky warming to orange around the sun, green ground.
+            let mut tint = if sky { [0.75 + 0.5 * glow, 0.9, 1.25 - 0.7 * glow] } else { [0.8, 1.15, 0.7] };
+            if sun {
+                tint = [1.; 3];
             }
             // The sphere, lit from the sun's side.
             let (cx, cy, r) = (0.32, 0.52, 0.2);
@@ -92,11 +114,12 @@ pub fn sample() -> Print {
                 let dz = (1. - d2).sqrt();
                 let (lx, ly, lz) = (0.62, -0.3, 0.72);
                 l = 0.04 + 0.96 * (dx * lx + dy * ly + dz * lz).max(0.).powf(1.4);
+                tint = [1.3, 0.75, 0.6];
             }
-            l.clamp(0., 1.)
+            tint.map(|t| (l * t).clamp(0., 1.))
         })
         .collect();
-    Print { w, h, lum }
+    Print::from_rgb(w, h, rgb)
 }
 
 /// How the print is adjusted before it's developed.
@@ -106,15 +129,34 @@ pub struct Adjust {
     pub brightness: f32,
     /// 0.25..3, 1 = unchanged
     pub contrast: f32,
+    /// 0.2..5, 1 = unchanged; above 1 lifts the midtones.
+    pub gamma: f32,
     pub invert: bool,
     /// Whether the ink is lighter than the paper (a dark scheme): then the
-    /// light parts of the photo get the ink.
+    /// light parts of the photo get the ink. ASCII only; a dither's palette
+    /// decides this itself.
     pub light_ink: bool,
 }
 
 impl Default for Adjust {
     fn default() -> Self {
-        Adjust { brightness: 0., contrast: 1., invert: false, light_ink: true }
+        Adjust { brightness: 0., contrast: 1., gamma: 1., invert: false, light_ink: true }
+    }
+}
+
+impl Adjust {
+    /// One channel (or a luminance) through brightness, contrast and gamma.
+    fn tone(&self, v: f32) -> f32 {
+        let v = ((v - 0.5) * self.contrast + 0.5 + self.brightness * 0.5).clamp(0., 1.);
+        v.powf(1. / self.gamma.max(0.05))
+    }
+
+    /// A colour through the tone controls and invert.
+    pub fn color(&self, c: Rgb) -> Rgb {
+        c.map(|v| {
+            let v = self.tone(v);
+            if self.invert { 1. - v } else { v }
+        })
     }
 }
 
@@ -125,7 +167,7 @@ pub fn ink_levels(print: &Print, adjust: Adjust) -> Vec<u8> {
         .lum
         .iter()
         .map(|&l| {
-            let l = ((l - 0.5) * adjust.contrast + 0.5 + adjust.brightness * 0.5).clamp(0., 1.);
+            let l = adjust.tone(l);
             let ink = if adjust.light_ink != adjust.invert { l } else { 1. - l };
             (ink * 255.).round() as u8
         })
@@ -137,33 +179,56 @@ pub fn rows_for(print: &Print, cols: u32) -> u32 {
     ((cols as f32 * print.aspect()).round() as u32).max(1)
 }
 
-/// The print at `cols`×rows, adjusted, as a dither picture: one sample per
-/// output pixel.
-pub fn picture(print: &Print, cols: u32, adjust: Adjust) -> Picture {
+/// A developed print: one palette index per pixel, and the palette.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Art {
+    pub w: u32,
+    pub h: u32,
+    pub index: Vec<u8>,
+    pub colors: Vec<Rgb>,
+}
+
+impl Art {
+    fn rgb8(&self) -> Vec<[u8; 3]> {
+        self.colors.iter().map(|c| c.map(|v| (v * 255.).round() as u8)).collect()
+    }
+
+    /// BGRA bytes with each art pixel `cell`×`cell`: what the preview uploads.
+    pub fn bgra(&self, cell: u32) -> (u32, u32, Vec<u8>) {
+        let cell = cell.max(1);
+        let (w, h) = (self.w * cell, self.h * cell);
+        let lut: Vec<[u8; 4]> = self.rgb8().iter().map(|[r, g, b]| [*b, *g, *r, 255]).collect();
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let row = &self.index[((y / cell) * self.w) as usize..][..self.w as usize];
+            for &i in row {
+                for _ in 0..cell {
+                    out.extend_from_slice(&lut[i as usize]);
+                }
+            }
+        }
+        (w, h, out)
+    }
+
+    /// A PNG with each art pixel `scale`×`scale`.
+    pub fn png(&self, scale: u32) -> Result<Vec<u8>, String> {
+        let scale = scale.max(1);
+        let lut = self.rgb8();
+        let img = image::RgbImage::from_fn(self.w * scale, self.h * scale, |x, y| {
+            image::Rgb(lut[self.index[((y / scale) * self.w + x / scale) as usize] as usize])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        Ok(out.into_inner())
+    }
+}
+
+/// Develop the print at `cols`×rows into `palette`.
+pub fn develop(print: &Print, cols: u32, adjust: Adjust, palette: Vec<Rgb>, params: Params) -> Art {
     let small = print.resize(cols, rows_for(print, cols));
-    Picture::new(small.w, small.h, ink_levels(&small, adjust))
-}
-
-/// Which pixels are inked: exactly what the preview draws for `picture`.
-pub fn mask(picture: &Picture, pattern: Pattern) -> Vec<bool> {
-    let (w, h) = picture.size();
-    let levels: Vec<f32> = (0..h)
-        .flat_map(|y| (0..w).map(move |x| (x, y)))
-        .map(|(x, y)| picture.sample((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32))
-        .collect();
-    dither::mask(pattern, w, h, &levels)
-}
-
-/// Encode the dithered picture as a PNG, each pixel `scale`×`scale`, in
-/// the given ink and paper (RGB).
-pub fn png(picture: &Picture, pattern: Pattern, scale: u32, ink: [u8; 3], paper: [u8; 3]) -> Result<Vec<u8>, String> {
-    let (w, h) = picture.size();
-    let scale = scale.max(1);
-    let mask = mask(picture, pattern);
-    let img = image::RgbImage::from_fn(w * scale, h * scale, |x, y| image::Rgb(if mask[((y / scale) * w + x / scale) as usize] { ink } else { paper }));
-    let mut out = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-    Ok(out.into_inner())
+    let pixels: Vec<Rgb> = small.rgb.iter().map(|&c| adjust.color(c)).collect();
+    let index = engine::dither(&pixels, small.w, small.h, &palette, params);
+    Art { w: small.w, h: small.h, index, colors: palette }
 }
 
 /// The print as text, `cols` characters wide.
@@ -185,14 +250,22 @@ pub fn text(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Algo;
+
+    const INK: Rgb = [1., 0.66, 0.23];
+    const PAPER: Rgb = [0.07, 0.07, 0.08];
+
+    fn grey(w: u32, h: u32, lum: Vec<f32>) -> Print {
+        Print::from_rgb(w, h, lum.into_iter().map(|l| [l; 3]).collect())
+    }
 
     fn ramp(w: u32, h: u32) -> Print {
-        Print { w, h, lum: (0..h).flat_map(|_| (0..w).map(move |x| x as f32 / (w - 1) as f32)).collect() }
+        grey(w, h, (0..h).flat_map(|_| (0..w).map(move |x| x as f32 / (w - 1) as f32)).collect())
     }
 
     #[test]
     fn resize_averages_area() {
-        let p = Print { w: 4, h: 2, lum: vec![0., 1., 0., 1., 0., 1., 0., 1.] };
+        let p = grey(4, 2, vec![0., 1., 0., 1., 0., 1., 0., 1.]);
         let s = p.resize(2, 1);
         assert_eq!((s.w, s.h), (2, 1));
         assert!(s.lum.iter().all(|v| (v - 0.5).abs() < 1e-6), "{:?}", s.lum);
@@ -202,7 +275,7 @@ mod tests {
 
     #[test]
     fn ink_follows_the_scheme() {
-        let p = Print { w: 2, h: 1, lum: vec![0., 1.] };
+        let p = grey(2, 1, vec![0., 1.]);
         // Dark scheme: light ink, so white in the photo is ink.
         assert_eq!(ink_levels(&p, Adjust::default()), vec![0, 255]);
         // Light scheme: dark ink, so black in the photo is ink.
@@ -212,36 +285,48 @@ mod tests {
     }
 
     #[test]
-    fn brightness_and_contrast() {
-        let p = Print { w: 3, h: 1, lum: vec![0.25, 0.5, 0.75] };
+    fn brightness_contrast_gamma() {
+        let p = grey(3, 1, vec![0.25, 0.5, 0.75]);
         let flat = ink_levels(&p, Adjust { contrast: 0.25, ..Adjust::default() });
         assert!(flat[2] - flat[0] < 40);
         let bright = ink_levels(&p, Adjust { brightness: 1., ..Adjust::default() });
         assert_eq!(bright[1], 255);
+        let lifted = ink_levels(&p, Adjust { gamma: 2., ..Adjust::default() });
+        assert!(lifted[1] > 170, "{lifted:?}");
     }
 
     #[test]
-    fn every_pattern_tracks_tone() {
-        let print = ramp(64, 16);
-        let pic = picture(&print, 64, Adjust::default());
-        assert_eq!(pic.size(), (64, 16));
-        for pattern in [Pattern::Bayer4, Pattern::BlueNoise, Pattern::Atkinson] {
-            let m = mask(&pic, pattern);
-            let left = m.iter().enumerate().filter(|(i, on)| **on && (*i as u32 % 64) < 32).count();
-            let right = m.iter().enumerate().filter(|(i, on)| **on && (*i as u32 % 64) >= 32).count();
-            assert!(right > left * 2, "{pattern:?}: {left} vs {right}");
-        }
+    fn develop_sizes_and_inks() {
+        let art = develop(&ramp(64, 16), 64, Adjust::default(), vec![PAPER, INK], Params { algo: Algo::Atkinson, ..Params::default() });
+        assert_eq!((art.w, art.h, art.index.len()), (64, 16, 64 * 16));
+        let inked = |x0: usize, x1: usize| art.index.iter().enumerate().filter(|(i, v)| (x0..x1).contains(&(i % 64)) && **v == 1).count();
+        assert!(inked(32, 64) > inked(0, 32) * 2);
+        // Invert hands the dark end the ink.
+        let inv = develop(&ramp(64, 16), 64, Adjust { invert: true, ..Adjust::default() }, vec![PAPER, INK], Params::default());
+        assert!(inv.index[0] == 1 && inv.index[63] == 0);
     }
 
     #[test]
-    fn png_is_scaled_and_two_coloured() {
-        let pic = picture(&ramp(16, 8), 16, Adjust::default());
-        let bytes = png(&pic, Pattern::Bayer4, 4, [255, 200, 0], [10, 10, 12]).unwrap();
+    fn png_is_scaled_and_in_the_palette() {
+        let art = develop(&ramp(16, 8), 16, Adjust::default(), vec![PAPER, INK], Params { algo: Algo::Bayer4, ..Params::default() });
+        let bytes = art.png(4).unwrap();
         let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
         assert_eq!(img.dimensions(), (64, 32));
-        assert!(img.pixels().all(|p| p.0 == [255, 200, 0] || p.0 == [10, 10, 12]));
-        // A 4×4 block is one picture pixel.
+        let lut = art.rgb8();
+        assert!(img.pixels().all(|p| lut.contains(&p.0)));
+        // A 4×4 block is one art pixel.
         assert_eq!(img.get_pixel(0, 0), img.get_pixel(3, 3));
+    }
+
+    #[test]
+    fn bgra_matches_the_png() {
+        let art = develop(&sample(), 40, Adjust::default(), vec![PAPER, INK], Params::default());
+        let (w, h, bytes) = art.bgra(3);
+        assert_eq!((w, h, bytes.len()), (120, art.h * 3, (120 * art.h * 3 * 4) as usize));
+        let png = image::load_from_memory(&art.png(3).unwrap()).unwrap().to_rgb8();
+        for (i, px) in png.pixels().enumerate().step_by(97) {
+            assert_eq!([bytes[i * 4 + 2], bytes[i * 4 + 1], bytes[i * 4]], px.0);
+        }
     }
 
     #[test]

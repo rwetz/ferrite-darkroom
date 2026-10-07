@@ -1,31 +1,34 @@
 //! Darkroom: a Ferrite dither studio.
 //!
-//! Drop in a photo (or open one) and develop it as pixel art with Ferrite's
-//! own dither masks — ordered Bayer, blue noise, Atkinson diffusion — or as
-//! ASCII with Ferrite's glyph-fitted character sets. The art takes the
-//! colours of the scheme you pick. Export a PNG or a text file.
+//! Drop in a photo (or open one) and develop it as pixel art — twenty
+//! dither algorithms (error diffusion and ordered) into the scheme's own
+//! ink or a preset palette (Game Boy, C64, CMYK…) — or as ASCII with
+//! Ferrite's glyph-fitted character sets. Export a PNG or a text file.
 //!
 //!     cargo run
 //!     cargo run -- photo.jpg
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod engine;
+mod palettes;
 mod settings;
 mod studio;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ferrite_design::ascii::{Charset, Fit};
-use ferrite_design::dither::Picture;
 use gpui::{
-    App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, ExternalPaths, IntoElement, KeyBinding, PathPromptOptions, Render,
-    Rgba, Subscription, Window, div, px, size,
+    App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corners, Entity, ExternalPaths, IntoElement, KeyBinding,
+    PathPromptOptions, Render, RenderImage, Rgba, Subscription, Window, canvas, div, point, px, size,
 };
 use ferrite_design::prelude::*;
 
-use settings::{Mode, PATTERNS, Settings};
-use studio::{Adjust, Print};
+use engine::{Algo, Params, Rgb, Space};
+use settings::{Mode, Settings};
+use studio::{Adjust, Art, Print};
 
 const APPEARANCES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
 const SCALES: [u32; 4] = [1, 2, 4, 8];
@@ -39,9 +42,28 @@ struct Photo {
     print: Print,
 }
 
-/// The developed picture and what it was developed with.
-type Developed = ((u32, [u32; 2], bool, bool), Picture);
-type Typeset = ((usize, [u32; 2], bool, bool, Charset, Fit), Rc<Vec<String>>);
+/// Everything a dither depends on, compared bit for bit to skip redevelops.
+#[derive(Clone, PartialEq)]
+struct DevKey {
+    cols: u32,
+    adjust: [u32; 3],
+    invert: bool,
+    algo: Algo,
+    strength: u32,
+    serpentine: bool,
+    space: Space,
+    palette: Vec<[u32; 3]>,
+}
+
+/// The developed art, and the texture the preview last uploaded for it.
+struct Developed {
+    key: DevKey,
+    art: Rc<Art>,
+    /// `(cell, image)`; rebuilt when the cell size changes.
+    shown: Option<(u32, Arc<RenderImage>)>,
+}
+
+type Typeset = ((usize, [u32; 3], bool, bool, Charset, Fit), Rc<Vec<String>>);
 
 struct Darkroom {
     settings: Settings,
@@ -50,6 +72,8 @@ struct Darkroom {
     /// Bumped per photo, to replay the develop effect.
     roll: u64,
     developed: Option<Developed>,
+    /// Textures replaced since the last frame, to free from the GPU atlas.
+    stale: Vec<Arc<RenderImage>>,
     typeset: Option<Typeset>,
     palette: Entity<CommandPalette>,
     toaster: Entity<Toaster>,
@@ -64,6 +88,7 @@ impl Darkroom {
             loading: false,
             roll: 0,
             developed: None,
+            stale: Vec::new(),
             typeset: None,
             palette: cx.new(|cx| CommandPalette::new(window, cx)),
             toaster: cx.new(|_| Toaster::new()),
@@ -139,6 +164,7 @@ impl Darkroom {
                     |s| {
                         s.brightness = 0.;
                         s.contrast = 1.;
+                        s.gamma = 1.;
                         s.invert = false;
                     },
                     window,
@@ -150,14 +176,29 @@ impl Darkroom {
             command("Dark theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "dark".into(), window, cx))),
             command("Light theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "light".into(), window, cx))),
         ];
-        for (pattern, _, label) in PATTERNS {
+        for algo in Algo::ALL {
             let weak = weak.clone();
-            commands.push(command(format!("Pattern: {label}")).group("Develop").on_run(move |window, cx| {
+            commands.push(command(format!("Algorithm: {}", algo.name())).group("Develop").on_run(move |window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     this.change(
                         |s| {
                             s.mode = Mode::Dither;
-                            s.pattern = pattern;
+                            s.algo = algo;
+                        },
+                        window,
+                        cx,
+                    )
+                });
+            }));
+        }
+        for preset in palettes::PRESETS {
+            let weak = weak.clone();
+            commands.push(command(format!("Palette: {}", preset.name)).group("Develop").on_run(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.change(
+                        |s| {
+                            s.mode = Mode::Dither;
+                            s.palette = preset.key.into();
                         },
                         window,
                         cx,
@@ -239,26 +280,77 @@ impl Darkroom {
         let p = palette(cx);
         let s = &self.settings;
         let ink = hsla(if s.accent_ink { p.accent } else { p.fg });
-        Adjust { brightness: s.brightness, contrast: s.contrast, invert: s.invert, light_ink: ink.l > hsla(p.bg).l }
+        Adjust { brightness: s.brightness, contrast: s.contrast, gamma: s.gamma, invert: s.invert, light_ink: ink.l > hsla(p.bg).l }
     }
 
-    fn adjust_key(a: Adjust) -> ([u32; 2], bool, bool) {
-        ([a.brightness.to_bits(), a.contrast.to_bits()], a.invert, a.light_ink)
+    fn adjust_key(a: Adjust) -> ([u32; 3], bool, bool) {
+        ([a.brightness.to_bits(), a.contrast.to_bits(), a.gamma.to_bits()], a.invert, a.light_ink)
     }
 
-    /// The dither picture, developed again only when something changed.
-    fn developed(&mut self, cx: &App) -> Picture {
+    /// The scheme's paper and ink, as the `Scheme` palette uses them.
+    fn scheme_inks(&self, cx: &App) -> (Rgb, Rgb) {
+        let p = palette(cx);
+        let rgb = |c: gpui::Hsla| {
+            let c = Rgba::from(c);
+            [c.r, c.g, c.b]
+        };
+        (rgb(hsla(p.bg)), rgb(hsla(if self.settings.accent_ink { p.accent } else { p.fg })))
+    }
+
+    fn preset(&self) -> &'static palettes::Preset {
+        palettes::by_key(&self.settings.palette).unwrap_or(&palettes::PRESETS[0])
+    }
+
+    fn palette_colors(&self, cx: &App) -> Vec<Rgb> {
+        let (paper, ink) = self.scheme_inks(cx);
+        self.preset().colors(paper, ink)
+    }
+
+    /// The dither, developed again only when something changed.
+    fn developed(&mut self, cx: &App) -> Rc<Art> {
         let a = self.adjust(cx);
-        let (b, inv, light) = Self::adjust_key(a);
-        let key = (self.settings.cols, b, inv, light);
-        match &self.developed {
-            Some((k, pic)) if *k == key => pic.clone(),
-            _ => {
-                let pic = studio::picture(&self.photo.print, self.settings.cols, a);
-                self.developed = Some((key, pic.clone()));
-                pic
-            }
+        let s = &self.settings;
+        let colors = self.palette_colors(cx);
+        let key = DevKey {
+            cols: s.cols,
+            adjust: Self::adjust_key(a).0,
+            invert: a.invert,
+            algo: s.algo,
+            strength: s.strength.to_bits(),
+            serpentine: s.serpentine,
+            space: s.space,
+            palette: colors.iter().map(|c| c.map(f32::to_bits)).collect(),
+        };
+        if let Some(d) = &self.developed
+            && d.key == key
+        {
+            return d.art.clone();
         }
+        let params = Params { algo: s.algo, strength: s.strength, serpentine: s.serpentine, space: s.space, seed: 1 };
+        let art = Rc::new(studio::develop(&self.photo.print, s.cols, a, colors, params));
+        if let Some(old) = self.developed.take().and_then(|d| d.shown) {
+            self.stale.push(old.1);
+        }
+        self.developed = Some(Developed { key, art: art.clone(), shown: None });
+        art
+    }
+
+    /// The preview texture for the current art at `cell` device px per pixel.
+    fn shown(&mut self, cell: u32, cx: &App) -> Arc<RenderImage> {
+        let art = self.developed(cx);
+        let d = self.developed.as_mut().expect("developed above");
+        if let Some((c, image)) = &d.shown
+            && *c == cell
+        {
+            return image.clone();
+        }
+        let (w, h, bytes) = art.bgra(cell);
+        let buffer = image::RgbaImage::from_raw(w, h, bytes).expect("bgra size matches");
+        let image = Arc::new(RenderImage::new([image::Frame::new(buffer)]));
+        if let Some((_, old)) = d.shown.replace((cell, image.clone())) {
+            self.stale.push(old);
+        }
+        image
     }
 
     fn typeset(&mut self, cx: &App) -> Rc<Vec<String>> {
@@ -309,17 +401,11 @@ impl Darkroom {
     }
 
     fn export_png(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let p = palette(cx);
-        let rgb = |c: gpui::Hsla| {
-            let c = Rgba::from(c);
-            [c.r, c.g, c.b].map(|v| (v * 255.).round() as u8)
-        };
-        let (ink, paper) = (rgb(hsla(if self.settings.accent_ink { p.accent } else { p.fg })), rgb(hsla(p.bg)));
-        let pic = self.developed(cx);
-        match studio::png(&pic, self.settings.pattern, self.settings.scale, ink, paper) {
+        let art = self.developed(cx);
+        match art.png(self.settings.scale) {
             Ok(bytes) => {
-                let pattern = PATTERNS.iter().find(|x| x.0 == self.settings.pattern).map(|x| x.1).unwrap_or("dither");
-                self.save_as(format!("{}-{pattern}.png", self.stem()), bytes, "PNG", cx);
+                let name = format!("{}-{}-{}.png", self.stem(), self.settings.algo.key(), self.settings.palette);
+                self.save_as(name, bytes, "PNG", cx);
             }
             Err(why) => self.toast(toast("Couldn't make the PNG").danger().message(why), cx),
         }
@@ -346,18 +432,29 @@ impl Darkroom {
         let (room_w, room_h) = (f32::from(view.width) - SIDEBAR - 72., f32::from(view.height) - 150.);
         match self.settings.mode {
             Mode::Dither => {
-                let pic = self.developed(cx);
-                let (w, h) = pic.size();
+                let art = self.developed(cx);
+                let (w, h) = (art.w, art.h);
                 // Whole device pixels per art pixel, so the preview is the export.
                 let sf = window.scale_factor();
-                let cell = ((room_w / w as f32).min(room_h / h as f32) * sf).floor().max(1.);
-                let (ew, eh) = (w as f32 * cell / sf, h as f32 * cell / sf);
-                develop(
-                    ("print", self.roll),
-                    self.roll,
-                    dither(pic).pattern(self.settings.pattern).ink(ink).paper(hsla(p.bg)).cell(cell as u32).w(px(ew)).h(px(eh)),
+                let cell = ((room_w / w as f32).min(room_h / h as f32) * sf).floor().max(1.) as u32;
+                let image = self.shown(cell, cx);
+                for old in self.stale.drain(..) {
+                    let _ = window.drop_image(old);
+                }
+                let (dw, dh) = (w * cell, h * cell);
+                let print = canvas(
+                    |_, _, _| {},
+                    move |bounds: Bounds<gpui::Pixels>, _, window: &mut Window, _| {
+                        // Snap to the device grid so texels land 1:1 on pixels.
+                        let sf = window.scale_factor();
+                        let origin = point(px((f32::from(bounds.origin.x) * sf).round() / sf), px((f32::from(bounds.origin.y) * sf).round() / sf));
+                        let target = Bounds::new(origin, size(px(dw as f32 / sf), px(dh as f32 / sf)));
+                        let _ = window.paint_image(target, target, Corners::default(), image, 0, false);
+                    },
                 )
-                .into_any_element()
+                .w(px(dw as f32 / sf))
+                .h(px(dh as f32 / sf));
+                develop(("print", self.roll), self.roll, print).into_any_element()
             }
             Mode::Ascii => {
                 let lines = self.typeset(cx);
@@ -379,6 +476,35 @@ impl Darkroom {
         }
     }
 
+    /// The preset row, the colours it gives, and how they're matched.
+    fn palette_picker(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let s = &self.settings;
+        let chips = palettes::PRESETS.iter().enumerate().map(|(i, preset)| {
+            let key = preset.key;
+            Button::new(("palette", i))
+                .label(preset.name)
+                .small()
+                .secondary()
+                .selected(s.palette == key)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.change(|s| s.palette = key.into(), window, cx)))
+        });
+        // The swatches are the art's own colours, data rather than chrome.
+        let swatches = self.palette_colors(cx).into_iter().map(|[r, g, b]| div().w(px(14.)).h(px(14.)).bg(Rgba { r, g, b, a: 1. }));
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().flex().flex_row().flex_wrap().gap_1().children(chips))
+            .child(div().flex().flex_row().flex_wrap().children(swatches))
+            .child(field("match", "Match colours").hint("Oklab compares as the eye does; RGB is cruder and punchier").stacked().child(
+                segmented("match-seg")
+                    .option("Oklab")
+                    .option("RGB")
+                    .selected(if s.space == Space::Rgb { 1 } else { 0 })
+                    .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.space = if *i == 1 { Space::Rgb } else { Space::Oklab }, window, cx))),
+            ))
+    }
+
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let s = &self.settings;
@@ -389,11 +515,35 @@ impl Darkroom {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(field("pattern", "Pattern").stacked().child(
-                    PATTERNS.iter().fold(segmented("pattern-seg"), |seg, (_, _, l)| seg.option(*l))
-                        .selected(PATTERNS.iter().position(|x| x.0 == s.pattern).unwrap_or(0))
-                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.pattern = PATTERNS[*i].0, window, cx))),
+                .child(
+                    field("algo", "Algorithm")
+                        .hint(if s.algo.diffuses() { "Error diffusion: each pixel's error carries to its neighbours" } else { "Ordered: a threshold map, stable and tileable" })
+                        .stacked()
+                        .child(
+                            select("algo-select")
+                                .options(Algo::ALL.iter().map(|a| a.name()))
+                                .selected(Algo::ALL.iter().position(|a| *a == s.algo))
+                                .width(px(220.))
+                                .on_change(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.algo = Algo::ALL[*i], window, cx))),
+                        ),
+                )
+                .child(field("strength", "Strength").stacked().child(
+                    slider("strength-slider")
+                        .range(0., 2.)
+                        .step(0.05)
+                        .value(s.strength)
+                        .width(px(220.))
+                        .format(|v| format!("{:.0}%", v * 100.).into())
+                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.strength = *v, window, cx))),
                 ))
+                .when(s.algo.diffuses(), |el| {
+                    el.child(
+                        switch("serpentine")
+                            .label("Serpentine")
+                            .checked(s.serpentine)
+                            .on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.serpentine = *on, window, cx))),
+                    )
+                })
                 .child(field("cols", "Width").stacked().child(
                     slider("cols-slider")
                         .range(32., 480.)
@@ -501,9 +651,25 @@ impl Darkroom {
                             .format(|v| format!("{v:.2}x").into())
                             .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.contrast = *v, window, cx))),
                     ))
+                    .child(field("gamma", "Gamma").stacked().child(
+                        slider("gamma-slider")
+                            .range(0.2, 3.)
+                            .step(0.05)
+                            .value(s.gamma)
+                            .width(px(220.))
+                            .format(|v| format!("{v:.2}").into())
+                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.gamma = *v, window, cx))),
+                    ))
                     .child(switch("invert").label("Invert").checked(s.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.invert = *on, window, cx))))
                     .child(rule(Some("palette"), window, cx))
-                    .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("The art takes the scheme's colours: its paper, and its text or accent as ink."))
+                    .when(mode == Mode::Dither, |el| el.child(self.palette_picker(cx)))
+                    .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(
+                        if mode == Mode::Dither && self.settings.palette != palettes::SCHEME {
+                            "The scheme dresses the window; the preset colours the art."
+                        } else {
+                            "The art takes the scheme's colours: its paper, and its text or accent as ink."
+                        },
+                    ))
                     .child(field("scheme", "Scheme").stacked().child(
                         select("scheme-select")
                             .options(SCHEMES.iter().map(|sc| sc.name))
@@ -565,7 +731,6 @@ impl Render for Darkroom {
 
         let open = Button::new("open").label("Open").icon(Icon::Folder).ghost().small().shortcut("Ctrl+O").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open(cx)));
         let sidebar = self.sidebar(window, cx);
-        let pattern = PATTERNS.iter().find(|x| x.0 == self.settings.pattern).map(|x| x.2).unwrap_or("");
 
         window_frame().child(power_on_in(
             "power",
@@ -589,7 +754,7 @@ impl Render for Darkroom {
                 .child(
                     status_bar()
                         .left(match self.settings.mode {
-                            Mode::Dither => format!("DITHER · {}", pattern.to_uppercase()),
+                            Mode::Dither => format!("DITHER · {} · {}", self.settings.algo.name().to_uppercase(), self.preset().name.to_uppercase()),
                             Mode::Ascii => format!("ASCII · {}", self.settings.charset.name().to_uppercase()),
                         })
                         .left(format!("SOURCE {w}×{h}"))
