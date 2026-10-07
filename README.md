@@ -54,9 +54,16 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
     *threshold* that moves where ink starts.
   The preview draws whole device pixels per art pixel, so it's exactly the
   export.
-- **ASCII.** All thirteen of ferrite-design's character sets, from classic
-  `.:-=+*#%@` to box drawing and the "best character" set, fitted by shape
-  (edges) or by tone (brightness), 20 to 200 characters wide.
+- **ASCII and text art.** All thirteen of ferrite-design's character sets,
+  from classic `.:-=+*#%@` to box drawing and the "best character" set,
+  fitted by shape (edges) or by tone (brightness), 20 to 200 characters
+  wide. Or pack more picture into each character: *braille* (2×4 dots),
+  *half blocks* and *quadrants*, dithered with any of the twenty algorithms,
+  and *colour half blocks*, two palette-coloured pixels per character.
+  Colour each cell with the ink, the photo's own colours or the palette.
+  Export plain text, ANSI (24-bit colour, `cat` it in a terminal), HTML,
+  SVG, or for braille and blocks a PNG; an animation exports as an *ASCII
+  film*, an HTML page that plays itself.
 - **Tone.** Brightness, contrast, gamma and invert.
 - **Palette.** *Scheme* inks the art in the scheme's text or accent colour
   on its background (light appearance gives dark ink on light paper). Or
@@ -110,8 +117,10 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   ferrite-darkroom --batch ./photos -o ./prints --recipe recipes/newsprint.toml
   ```
 
-  A painted mask goes along with `--mask mask.png`. The output's extension picks the format: `.png` (an APNG for an
-  animation), `.gif`, or `.txt` for ASCII. Without `--recipe` it uses the
+  A painted mask goes along with `--mask mask.png`. The output's
+  extension picks the format: `.png` (an APNG for an animation), `.gif`,
+  or text art as `.txt`, `.ans`, `.svg` or `.html` (an ASCII film for an
+  animation). Without `--recipe` it uses the
   app's last recipe; `--help` lists the rest.
 - **Ferrite throughout.** Ten color schemes, a command palette
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with every algorithm,
@@ -204,6 +213,8 @@ ink = accent          # accent | text: the Scheme palette's ink
 charset = best-character
 fit = shape           # shape | tone
 ascii_cols = 80
+glyphs = characters   # characters | braille | half-blocks | quadrants | colour-blocks
+ascii_colour = ink    # ink | photo | palette
 ```
 
 `FERRITE_*` variables (the shared look from
@@ -241,6 +252,8 @@ cargo clippy --all-targets
 - `src/sequence.rs`: animations: decoding frames, developing a whole
   clip with temporal stability, and GIF / APNG / sprite-sheet encoding.
 - `src/batch.rs` and `src/cli.rs`: developing files without a window.
+- `src/textart.rs`: text art: glyph sets, cell colours, and the text,
+  ANSI, HTML, SVG, PNG and film exports.
 - `src/mask.rs`: masks (brightness, colour, border flood, painted) and
   their dithered edges.
 - `src/render.rs`: how art pixels are drawn (shapes, gutter, paper,

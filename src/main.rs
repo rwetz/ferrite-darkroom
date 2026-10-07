@@ -21,6 +21,7 @@ mod render;
 mod sequence;
 mod settings;
 mod studio;
+mod textart;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -44,6 +45,7 @@ use recipe::{Background, Mode, Recipe};
 use render::{Paper, Shape};
 use settings::Settings;
 use sequence::Clip;
+use textart::{Glyphs, TextArt, Tint};
 use studio::{Adjust, Art, Print};
 
 const APPEARANCES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
@@ -240,7 +242,8 @@ struct Tile {
     current: bool,
 }
 
-type Typeset = ((usize, [u32; 3], bool, bool, Charset, Fit), Rc<Vec<String>>);
+/// The typeset text art and the inputs it came from.
+type Typeset = (u64, Rc<TextArt>);
 
 struct Darkroom {
     settings: Settings,
@@ -444,6 +447,10 @@ impl Darkroom {
             })),
             command("Export PNG…").group("File").icon(Icon::File).shortcut("Ctrl+E").on_run(run(|this, window, cx| this.export_png(window, cx))),
             command("Export text…").group("File").icon(Icon::File).shortcut("Ctrl+Shift+E").on_run(run(|this, _, cx| this.export_text(cx))),
+            command("Export ANSI…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_textart("ans", cx))),
+            command("Export HTML…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_textart("html", cx))),
+            command("Export SVG…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_textart("svg", cx))),
+            command("Export ASCII film…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_film(cx))),
             command("Copy ASCII").group("File").icon(Icon::Copy).shortcut("Ctrl+Shift+C").on_run(run(|this, _, cx| this.copy_text(cx))),
             command("Back to the sample").group("File").icon(Icon::Refresh).on_run(run(|this, _, cx| {
                 this.photo = Photo::sample();
@@ -500,6 +507,20 @@ impl Darkroom {
                 });
             }));
         }
+        for glyphs in Glyphs::ALL {
+            let weak = weak.clone();
+            commands.push(command(format!("Glyphs: {}", glyphs.name())).group("Develop").on_run(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.set_recipe(
+                        |r| {
+                            r.mode = Mode::Ascii;
+                            r.glyphs = glyphs;
+                        },
+                        cx,
+                    )
+                });
+            }));
+        }
         for charset in Charset::ALL {
             let weak = weak.clone();
             commands.push(command(format!("Characters: {}", charset.name())).group("Develop").on_run(move |window, cx| {
@@ -507,6 +528,7 @@ impl Darkroom {
                     this.change(
                         |s| {
                             s.recipe.mode = Mode::Ascii;
+                            s.recipe.glyphs = Glyphs::Characters;
                             s.recipe.charset = charset;
                             s.recipe.fit = charset.default_fit();
                         },
@@ -1052,19 +1074,30 @@ impl Darkroom {
         tiles
     }
 
-    fn typeset(&mut self, cx: &App) -> Rc<Vec<String>> {
+    fn typeset(&mut self, cx: &App) -> Rc<TextArt> {
         let a = self.adjust(cx);
-        let (b, inv, light) = Self::adjust_key(a);
-        let s = &self.settings;
-        let key = (s.recipe.ascii_cols as usize, b, inv, light, s.recipe.charset, s.recipe.fit);
+        let (paper, ink) = self.scheme_inks(cx);
+        let colors = self.palette_colors(cx);
+        let bits = |c: &[Rgb]| c.iter().map(|c| c.map(f32::to_bits)).collect::<Vec<_>>();
+        let r = &self.settings.recipe;
+        let key = key_of((self.roll, self.photo.frame, Self::adjust_key(a), r.flat_lines(), bits(&colors), bits(&[paper, ink])));
         match &self.typeset {
-            Some((k, lines)) if *k == key => lines.clone(),
+            Some((k, art)) if *k == key => art.clone(),
             _ => {
-                let lines = studio::ascii_lines(self.photo.print(), key.0, a, s.recipe.charset, s.recipe.fit);
-                self.typeset = Some((key, lines.clone()));
-                lines
+                let art = Rc::new(textart::make(self.photo.print(), r, a, &colors, paper, ink));
+                self.typeset = Some((key, art.clone()));
+                art
             }
         }
+    }
+
+    /// Every frame as text art (stills: one), for the film and exports.
+    fn typeset_all(&self, cx: &App) -> Vec<TextArt> {
+        let a = self.adjust(cx);
+        let (paper, ink) = self.scheme_inks(cx);
+        let colors = self.palette_colors(cx);
+        let r = &self.settings.recipe;
+        self.photo.clip.frames.iter().map(|f| textart::make(&f.print, r, a, &colors, paper, ink)).collect()
     }
 
     // ── Exports ──────────────────────────────────────────────────────────
@@ -1111,12 +1144,37 @@ impl Darkroom {
     }
 
     fn export_text(&mut self, cx: &mut Context<Self>) {
-        let text = studio::text(&self.typeset(cx));
+        let text = self.typeset(cx).text();
         self.save_as(format!("{}.txt", self.stem()), text.into_bytes(), "Text", cx);
     }
 
+    /// Text art out as ANSI, HTML, SVG or (braille and blocks) PNG.
+    fn export_textart(&mut self, ext: &'static str, cx: &mut Context<Self>) {
+        let art = self.typeset(cx);
+        let stem = self.stem();
+        let (bytes, what): (Result<Vec<u8>, String>, &'static str) = match ext {
+            "ans" => (Ok(art.ansi().into_bytes()), "ANSI"),
+            "html" => (Ok(art.html(&stem).into_bytes()), "HTML"),
+            "svg" => (Ok(art.svg().into_bytes()), "SVG"),
+            _ => (art.png(self.settings.recipe.scale.min(4)), "PNG"),
+        };
+        match bytes {
+            Ok(bytes) => self.save_as(format!("{stem}.{ext}"), bytes, what, cx),
+            Err(why) => self.toast(toast(format!("Couldn't make the {what}")).danger().message(why), cx),
+        }
+    }
+
+    /// An animation's text art as an HTML page that plays itself.
+    fn export_film(&mut self, cx: &mut Context<Self>) {
+        let frames = self.typeset_all(cx);
+        let delays = sequence::delays(&self.photo.clip.frames, self.settings.recipe.speed);
+        let stem = self.stem();
+        let page = textart::film(&frames, &delays, &stem);
+        self.save_as(format!("{stem}-film.html"), page.into_bytes(), "ASCII film", cx);
+    }
+
     fn copy_text(&mut self, cx: &mut Context<Self>) {
-        let text = studio::text(&self.typeset(cx));
+        let text = self.typeset(cx).text();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.toast(toast("ASCII copied").success(), cx);
     }
@@ -1171,7 +1229,27 @@ impl Darkroom {
                 develop(("print", self.roll), self.roll, texture(after, dw, dh, sf)).into_any_element()
             }
             Mode::Ascii => {
-                let lines = self.typeset(cx);
+                let art = self.typeset(cx);
+                let room_h = if self.photo.frames() > 1 { room_h - 44. } else { room_h };
+                if art.is_drawable() {
+                    // Braille and blocks: drawn as pixels, so no font can misalign them.
+                    let sf = window.scale_factor();
+                    let (cw, chh) = (art.cols as f32 * 8., art.rows as f32 * 16.);
+                    let scale = ((room_w / cw).min(room_h / chh) * sf).floor().max(1.) as u32;
+                    let key = key_of(("textart", self.typeset.as_ref().map(|t| t.0), scale));
+                    let image = self.tex.get(key, || {
+                        let (w, h, mut px) = art.raster(scale);
+                        for p in px.as_chunks_mut::<4>().0 {
+                            p.swap(0, 2);
+                        }
+                        (w, h, px)
+                    });
+                    let (dw, dh) = (art.cols as u32 * 8 * scale, art.rows as u32 * 16 * scale);
+                    return texture(image, dw, dh, sf).into_any_element();
+                }
+                let paper = Rgba { r: art.paper[0], g: art.paper[1], b: art.paper[2], a: 1. };
+                let rgba = |c: Rgb| Rgba { r: c[0], g: c[1], b: c[2], a: 1. };
+                let tinted = art.cells.iter().any(|c| c.fg.is_some() || c.bg.is_some());
                 div()
                     .id("ascii-scroll")
                     .max_w(px(room_w))
@@ -1183,7 +1261,12 @@ impl Darkroom {
                             .flex_col()
                             .flex_none()
                             .text_color(ink)
-                            .children(lines.iter().map(|l| div().display(Scale::X1, window).whitespace_nowrap().child(l.clone()))),
+                            .when(tinted, |el| el.bg(paper))
+                            .children((0..art.rows).map(|y| {
+                                div().flex().flex_row().display(Scale::X1, window).whitespace_nowrap().children(art.runs(y).into_iter().map(move |run| {
+                                    div().whitespace_nowrap().text_color(rgba(run.fg)).when_some(run.bg, |el, bg| el.bg(rgba(bg))).child(run.text)
+                                }))
+                            })),
                     )
                     .into_any_element()
             }
@@ -1650,7 +1733,36 @@ impl Darkroom {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(field("charset", "Characters").stacked().child(
+                .child(
+                    field("glyphs", "Glyphs").hint("Braille and blocks pack several dithered pixels into each character").stacked().child(
+                        select("glyphs-select")
+                            .options(Glyphs::ALL.iter().map(|g| g.name()))
+                            .selected(Glyphs::ALL.iter().position(|g| *g == s.recipe.glyphs))
+                            .width(px(220.))
+                            .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.glyphs = Glyphs::ALL[*i], cx))),
+                    ),
+                )
+                .child(
+                    field("ascii-tint", "Colour").hint(if s.recipe.glyphs == Glyphs::ColorBlocks { "Colour half blocks always use the palette" } else { "Ink, the photo's own colours, or the palette's" }).stacked().child(
+                        Tint::ALL
+                            .iter()
+                            .fold(segmented("tint-seg"), |seg, t| seg.option(t.name()))
+                            .selected(Tint::ALL.iter().position(|t| *t == s.recipe.ascii_tint).unwrap_or(0))
+                            .on_select(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.ascii_tint = Tint::ALL[*i], cx))),
+                    ),
+                )
+                .when(s.recipe.glyphs != Glyphs::Characters, |el| {
+                    el.child(
+                        field("ascii-algo", "Dither").stacked().child(
+                            select("ascii-algo-select")
+                                .options(Algo::ALL.iter().map(|a| a.name()))
+                                .selected(Algo::ALL.iter().position(|a| *a == s.recipe.algo))
+                                .width(px(220.))
+                                .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.algo = Algo::ALL[*i], cx))),
+                        ),
+                    )
+                })
+                .when(s.recipe.glyphs == Glyphs::Characters, |el| el.child(field("charset", "Characters").stacked().child(
                     select("charset-select")
                         .options(Charset::ALL.iter().map(|c| c.name()))
                         .selected(Charset::ALL.iter().position(|c| *c == s.recipe.charset))
@@ -1666,14 +1778,13 @@ impl Darkroom {
                                 cx,
                             )
                         })),
-                ))
-                .child(field("fit", "Fit").hint("Shape follows edges; tone follows brightness").stacked().child(
+                )).child(field("fit", "Fit").hint("Shape follows edges; tone follows brightness").stacked().child(
                     segmented("fit-seg")
                         .option("Shape")
                         .option("Tone")
                         .selected(if s.recipe.fit == Fit::Tone { 1 } else { 0 })
                         .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.fit = if *i == 1 { Fit::Tone } else { Fit::Shape }, window, cx))),
-                ))
+                )))
                 .child(field("ascii-cols", "Width").stacked().child(
                     slider("ascii-cols-slider")
                         .range(20., 200.)
@@ -1714,9 +1825,27 @@ impl Darkroom {
                 .flex()
                 .flex_col()
                 .gap_2()
+                .when(animated, |el| {
+                    el.child(Button::new("export-film").label("Export ASCII film").icon(Icon::File).primary().full_width().on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.export_film(cx)),
+                    ))
+                })
                 .child(Button::new("export-text").label("Export text").icon(Icon::File).primary().full_width().shortcut("Ctrl+Shift+E").on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.export_text(cx)),
                 ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(Button::new("export-ans").label("ANSI").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("ans", cx))))
+                        .child(Button::new("export-html").label("HTML").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("html", cx))))
+                        .child(Button::new("export-svg").label("SVG").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("svg", cx))))
+                        .when(s.recipe.glyphs != Glyphs::Characters, |el| {
+                            el.child(Button::new("export-tpng").label("PNG").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("png", cx))))
+                        }),
+                )
                 .child(Button::new("copy-text").label("Copy").icon(Icon::Copy).secondary().full_width().shortcut("Ctrl+Shift+C").on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.copy_text(cx)),
                 )),
@@ -1884,7 +2013,10 @@ impl Render for Darkroom {
                     status_bar()
                         .left(match self.settings.recipe.mode {
                             Mode::Dither => format!("DITHER · {} · {}", self.settings.recipe.algo.name().to_uppercase(), self.palette_name().to_uppercase()),
-                            Mode::Ascii => format!("ASCII · {}", self.settings.recipe.charset.name().to_uppercase()),
+                            Mode::Ascii => match self.settings.recipe.glyphs {
+                                Glyphs::Characters => format!("ASCII · {}", self.settings.recipe.charset.name().to_uppercase()),
+                                g => format!("ASCII · {}", g.name().to_uppercase()),
+                            },
                         })
                         .left(format!("SOURCE {w}×{h}"))
                         .when(self.photo.frames() > 1, |bar| bar.right_live(format!("FRAME {}/{}", self.photo.frame + 1, self.photo.frames())))

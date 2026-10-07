@@ -14,6 +14,7 @@ use crate::engine::{Algo, Params, Rgb, Space};
 use crate::mask::{self, Kind};
 use crate::palettes;
 use crate::render::{Cells, Look, Paper, Shape};
+use crate::textart::{Glyphs, Tint};
 
 /// What the background layer (where the mask isn't) becomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -107,6 +108,10 @@ pub struct Recipe {
     pub fit: Fit,
     /// ASCII width in characters.
     pub ascii_cols: u32,
+    /// ASCII: characters, braille or blocks.
+    pub glyphs: Glyphs,
+    /// ASCII: how cells are coloured.
+    pub ascii_tint: Tint,
 }
 
 impl Default for Recipe {
@@ -145,6 +150,8 @@ impl Default for Recipe {
             charset: Charset::Full,
             fit: Fit::Shape,
             ascii_cols: 80,
+            glyphs: Glyphs::Characters,
+            ascii_tint: Tint::Ink,
         }
     }
 }
@@ -315,6 +322,8 @@ impl Recipe {
             "charset" => self.charset = Charset::ALL.into_iter().find(|c| charset_key(*c) == v).unwrap_or(self.charset),
             "fit" => self.fit = if v == "tone" { Fit::Tone } else { Fit::Shape },
             "ascii_cols" => self.ascii_cols = u(16, 240, self.ascii_cols),
+            "glyphs" => self.glyphs = Glyphs::from_key(v).unwrap_or(self.glyphs),
+            "ascii_colour" => self.ascii_tint = Tint::from_key(v).unwrap_or(self.ascii_tint),
             _ => return false,
         }
         true
@@ -371,6 +380,8 @@ impl Recipe {
             ("charset", text(&charset_key(self.charset))),
             ("fit", text(if self.fit == Fit::Tone { "tone" } else { "shape" })),
             ("ascii_cols", bare(self.ascii_cols.to_string())),
+            ("glyphs", text(self.glyphs.key())),
+            ("ascii_colour", text(self.ascii_tint.key())),
         ]);
         out
     }
@@ -489,6 +500,8 @@ mod tests {
             charset: Charset::Box,
             fit: Fit::Tone,
             ascii_cols: 120,
+            glyphs: Glyphs::Braille,
+            ascii_tint: Tint::Palette,
         }
     }
 

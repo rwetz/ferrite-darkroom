@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::engine::{Rgb, oklab};
 use crate::recipe::Recipe;
 use crate::studio::{self, Adjust};
-use crate::{render, sequence};
+use crate::{render, sequence, textart};
 
 /// What to develop with: the recipe, and the scheme's paper and ink (for
 /// the Scheme palette and for ASCII).
@@ -45,8 +45,9 @@ impl Job {
     }
 
     /// Develop `input` into `output`. `.gif` makes a GIF (a still makes a
-    /// one-frame GIF), `.png` a PNG (an APNG for an animation), `.txt` the
-    /// ASCII of the first frame.
+    /// one-frame GIF), `.png` a PNG (an APNG for an animation); `.txt`,
+    /// `.ans`, `.html` and `.svg` make text art of the first frame (an
+    /// animation's `.html` is a film that plays every frame).
     pub fn develop_file(&self, input: &Path, output: &Path) -> Result<(), String> {
         let ext = output.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let clip = sequence::load(input)?;
@@ -63,12 +64,25 @@ impl Job {
                     _ => render::png(&arts[0], r.scale, r.look())?,
                 }
             }
-            "txt" => {
-                let lines = studio::ascii_lines(&clip.frames[0].print, r.ascii_cols as usize, adjust, r.charset, r.fit);
-                studio::text(&lines).into_bytes()
+            "txt" | "ans" | "html" | "svg" => {
+                let art = |print: &studio::Print| textart::make(print, r, adjust, &colors, self.paper, self.ink);
+                let first = art(&clip.frames[0].print);
+                let title = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                match ext.as_str() {
+                    "txt" => first.text(),
+                    "ans" => first.ansi(),
+                    "svg" => first.svg(),
+                    // An animation becomes a film that plays itself.
+                    _ if clip.is_animated() => {
+                        let frames: Vec<_> = clip.frames.iter().map(|f| art(&f.print)).collect();
+                        textart::film(&frames, &sequence::delays(&clip.frames, r.speed), &title)
+                    }
+                    _ => first.html(&title),
+                }
+                .into_bytes()
             }
-            "" => return Err(format!("{} has no extension; use .png, .gif or .txt", output.display())),
-            other => return Err(format!(".{other} isn't an output Darkroom makes; use .png, .gif or .txt")),
+            "" => return Err(format!("{} has no extension; use .png, .gif, .txt, .ans, .html or .svg", output.display())),
+            other => return Err(format!(".{other} isn't an output Darkroom makes; use .png, .gif, .txt, .ans, .html or .svg")),
         };
         if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;

@@ -184,8 +184,13 @@ Progress is marked inline: ✅ done, everything else still to do.
    covers plain backdrops, painting covers the rest.
    Original scope: Luma/colour key, paint mask, layers with
    per-layer recipes; then ONNX subject segmentation.
-5. **0.6: ASCII engine.** Glyph-shape matching on PxPlus CP437, braille,
-   blocks, colour ASCII, ANSI/HTML/SVG export, ASCII film.
+5. **0.6: ASCII engine.** ✅ Glyph-shape matching on the display face
+   (ferrite-design's fitted charsets, by shape or tone), ✅ braille,
+   half blocks, quadrants, colour half blocks, dithered at sub-cell
+   resolution; ✅ cell colour (ink / photo / palette); ✅ ANSI / HTML / SVG /
+   PNG export; ✅ ASCII film (HTML). *Not done:* sextants (no common font
+   draws them yet). Original scope: Glyph-shape matching on PxPlus CP437,
+   braille, blocks, colour ASCII, ANSI/HTML/SVG export, ASCII film.
 6. **0.7: the long tail.** Halftone screens with CMYK angles, Riemersma,
    dot diffusion, Yliluoma, Knoll, Ostromoukhov, stippling, hatching,
    custom tiles, palette extraction; video and webcam via ffmpeg.
