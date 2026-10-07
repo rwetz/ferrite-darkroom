@@ -4,6 +4,15 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-07
+
+### Fixed
+
+- Windows: the Open button in the title bar does something when clicked. The
+  whole title bar was a window-drag area, so Windows took the click as the
+  start of a drag (ferrite-design's `title_bar`).
+- The date rolls over at local midnight, not UTC midnight.
+
 ## [0.1.0] - 2026-10-07
 
 The first release.
@@ -19,4 +28,5 @@ The first release.
 - The shared look from Lodestone (`FERRITE_*`) when launched from it.
 - The pixel-art logo as the Windows executable, window and taskbar icon.
 
+[0.1.1]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v0.1.0

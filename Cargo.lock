@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-darkroom"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ferrite-design",
  "gpui-pre",
@@ -1572,12 +1572,13 @@ dependencies = [
 [[package]]
 name = "ferrite-design"
 version = "0.1.0"
-source = "git+https://github.com/rwetz/ferrite-design?rev=8129fdb50032cc6ec91c1c4ae9a86059870e3b26#8129fdb50032cc6ec91c1c4ae9a86059870e3b26"
+source = "git+https://github.com/rwetz/ferrite-design?rev=ebf7ee99f6265fc81875f0c798aba8a4e306e160#ebf7ee99f6265fc81875f0c798aba8a4e306e160"
 dependencies = [
  "anyhow",
  "gpui-pre",
  "gpui-pre-platform",
  "image",
+ "libc",
  "raw-window-handle",
  "unicode-segmentation",
  "windows 0.62.2",

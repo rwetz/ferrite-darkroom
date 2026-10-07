@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-darkroom"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Ferrite dither studio: turn a photo into Bayer, blue-noise or Atkinson pixel art or ASCII, and export PNG or text."
 authors = ["Ryan Wetzstein"]
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
-ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "8129fdb50032cc6ec91c1c4ae9a86059870e3b26" }
+ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "ebf7ee99f6265fc81875f0c798aba8a4e306e160" }
 # Must match ferrite-design exactly (PITFALLS §1).
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8" }
