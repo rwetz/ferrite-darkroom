@@ -291,12 +291,40 @@ impl Default for Params {
     }
 }
 
+/// The previous frame, for temporal stability: its indices, which pixels'
+/// source stood still since then, and how readily to keep a pixel's old
+/// colour (0..1).
+pub struct Hold<'a> {
+    pub prev: &'a [u8],
+    pub still: &'a [bool],
+    pub margin: f32,
+}
+
+impl Hold<'_> {
+    /// The previous index at `at`, if its source stood still there and
+    /// that colour is nearly as good a match (`d_prev` vs `d_fresh`, squared
+    /// distances) as the fresh choice. `gap2` is the palette's typical
+    /// squared step, so the margin means the same on any palette.
+    fn keep(&self, at: usize, d_prev: f32, d_fresh: f32, gap2: f32) -> bool {
+        self.still[at] && d_prev <= d_fresh + self.margin * 0.5 * gap2
+    }
+}
+
 /// How far a full bias moves the threshold, as a share of the tonal range.
 const BIAS_REACH: f32 = 0.45;
 
 /// Dither `pixels` (`w`×`h`, row-major sRGB) to `palette`. Returns one
 /// palette index per pixel. An empty palette gives all zeros.
 pub fn dither(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params) -> Vec<u8> {
+    dither_held(pixels, w, h, palette, p, None)
+}
+
+/// [`dither`], keeping the previous frame's colours where they still fit.
+/// Holding happens inside error diffusion, so a kept pixel's error still
+/// reaches its neighbours: tone stays right, and dots left behind by
+/// something that moved away get cleared instead of frozen. Ordered
+/// algorithms are stable by nature and ignore `hold`.
+pub fn dither_held(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params, hold: Option<&Hold>) -> Vec<u8> {
     let n = (w * h) as usize;
     debug_assert_eq!(pixels.len(), n);
     if palette.len() < 2 {
@@ -304,7 +332,7 @@ pub fn dither(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params) -> Vec
     }
     let pal_lab: Vec<[f32; 3]> = palette.iter().map(|&c| oklab(c)).collect();
     if palette.len() == 2 {
-        return duotone(pixels, w, h, &pal_lab, p);
+        return duotone(pixels, w, h, &pal_lab, p, hold);
     }
 
     // Fit the picture's lightness into the palette's, so a palette with no
@@ -337,6 +365,9 @@ pub fn dither(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params) -> Vec
     };
 
     if let Some((taps, div)) = p.algo.kernel() {
+        let d2 = |a: [f32; 3], b: [f32; 3]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
+        // The palette's typical step: each colour's distance to its nearest other.
+        let gap2 = pal.iter().map(|&a| pal.iter().filter(|&&b| b != a).map(|&b| d2(a, b)).fold(f32::MAX, f32::min)).sum::<f32>() / pal.len() as f32;
         let mut out = vec![0u8; n];
         let (wi, hi_) = (w as i32, h as i32);
         for y in 0..hi_ {
@@ -345,7 +376,13 @@ pub fn dither(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params) -> Vec
                 let x = if rtl { wi - 1 - i } else { i };
                 let at = (y * wi + x) as usize;
                 let v = work[at];
-                let q = nearest(v);
+                let mut q = nearest(v);
+                if let Some(h) = hold {
+                    let pq = h.prev[at] as usize;
+                    if pq < pal.len() && pq != q && h.keep(at, d2(v, pal[pq]), d2(v, pal[q]), gap2) {
+                        q = pq;
+                    }
+                }
                 out[at] = q as u8;
                 let c = pal[q];
                 let err = [(v[0] - c[0]) * p.strength, (v[1] - c[1]) * p.strength, (v[2] - c[2]) * p.strength];
@@ -385,7 +422,7 @@ pub fn dither(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params) -> Vec
 
 /// Two colours: dither the lightness between them as a single level, which
 /// keeps the full tonal range whatever the two colours are.
-fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params) -> Vec<u8> {
+fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params, hold: Option<&Hold>) -> Vec<u8> {
     let (dark, light) = if pal[0][0] <= pal[1][0] { (0u8, 1u8) } else { (1, 0) };
     let mut level: Vec<f32> = pixels.iter().map(|&c| oklab(c)[0].clamp(0., 1.)).collect();
     let cut = 0.5 - p.bias * BIAS_REACH;
@@ -398,7 +435,14 @@ fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params) -> Vec<u
                 let x = if rtl { wi - 1 - i } else { i };
                 let at = (y * wi + x) as usize;
                 let v = level[at];
-                let on = v > cut;
+                let mut on = v > cut;
+                if let Some(h) = hold {
+                    let was = h.prev[at] == light;
+                    let d = |lit: bool| (v - if lit { 1. } else { 0. }).powi(2);
+                    if was != on && h.keep(at, d(was), d(on), 1.) {
+                        on = was;
+                    }
+                }
                 out[at] = if on { light } else { dark };
                 let err = (v - if on { 1. } else { 0. }) * p.strength;
                 for &(dx, dy, wt) in taps {

@@ -192,12 +192,28 @@ pub struct Art {
 
 /// Develop the print at `cols`×rows into `palette`.
 pub fn develop(print: &Print, cols: u32, adjust: Adjust, palette: Vec<Rgb>, params: Params) -> Art {
+    develop_held(print, cols, adjust, palette, params, None)
+}
+
+/// [`develop`], holding the previous frame's colours where the photo
+/// stood still (`prev` and `margin`, see [`engine::Hold`]).
+pub fn develop_held(print: &Print, cols: u32, adjust: Adjust, palette: Vec<Rgb>, params: Params, prev: Option<(&Art, f32)>) -> Art {
     let small = print.resize(cols, rows_for(print, cols));
     let pixels: Vec<Rgb> = small.rgb.iter().map(|&c| adjust.color(c)).collect();
-    let index = engine::dither(&pixels, small.w, small.h, &palette, params);
-    let lum = pixels.iter().map(|&c| engine::oklab(c)[0]).collect();
+    let lum: Vec<f32> = pixels.iter().map(|&c| engine::oklab(c)[0]).collect();
+    let index = match prev {
+        Some((prev, margin)) if prev.index.len() == pixels.len() => {
+            let still: Vec<bool> = lum.iter().zip(&prev.lum).map(|(a, b)| (a - b).abs() < STILL).collect();
+            let hold = engine::Hold { prev: &prev.index, still: &still, margin };
+            engine::dither_held(&pixels, small.w, small.h, &palette, params, Some(&hold))
+        }
+        _ => engine::dither(&pixels, small.w, small.h, &palette, params),
+    };
     Art { w: small.w, h: small.h, index, colors: palette, lum }
 }
+
+/// A pixel whose lightness moved less than this between frames stood still.
+const STILL: f32 = 0.02;
 
 /// The print as text, `cols` characters wide.
 pub fn ascii_lines(print: &Print, cols: usize, adjust: Adjust, charset: Charset, fit: Fit) -> std::rc::Rc<Vec<String>> {

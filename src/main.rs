@@ -14,6 +14,7 @@ mod engine;
 mod palettes;
 mod recipe;
 mod render;
+mod sequence;
 mod settings;
 mod studio;
 
@@ -35,6 +36,7 @@ use engine::{Algo, Rgb, Space};
 use recipe::{Mode, Recipe};
 use render::{Paper, Shape};
 use settings::Settings;
+use sequence::Clip;
 use studio::{Adjust, Art, Print};
 
 const APPEARANCES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
@@ -151,17 +153,42 @@ fn compare(before: Arc<RenderImage>, after: Arc<RenderImage>, dw: u32, dh: u32, 
     .h(px(dh as f32 / sf))
 }
 
-/// What's on the easel.
+/// What's on the easel: a still, or an animation's frames.
 struct Photo {
     name: String,
     /// Where it came from (for the export dialog's folder).
     path: Option<PathBuf>,
-    print: Print,
+    clip: Arc<Clip>,
+    /// The frame on show.
+    frame: usize,
+}
+
+impl Photo {
+    fn sample() -> Photo {
+        Photo { name: "sample".into(), path: None, clip: Arc::new(Clip::still(studio::sample())), frame: 0 }
+    }
+
+    fn print(&self) -> &Print {
+        &self.clip.frames[self.frame.min(self.clip.frames.len() - 1)].print
+    }
+
+    fn frames(&self) -> usize {
+        self.clip.frames.len()
+    }
+}
+
+/// What an animation export makes.
+#[derive(Clone, Copy)]
+enum AnimOut {
+    Gif,
+    Apng,
+    Sheet,
 }
 
 /// Everything a dither depends on, compared bit for bit to skip redevelops.
 #[derive(Clone, PartialEq, Hash)]
 struct DevKey {
+    frame: usize,
     cols: u32,
     adjust: [u32; 3],
     invert: bool,
@@ -206,6 +233,14 @@ struct Darkroom {
     undo: Vec<Recipe>,
     redo: Vec<Recipe>,
     last_edit: Option<Instant>,
+    /// An animation's frames, all developed (with stability), and the
+    /// inputs they came from; developed in the background.
+    reel: Option<(u64, Arc<Vec<Art>>)>,
+    /// The inputs of the reel being developed now.
+    reel_job: Option<u64>,
+    playing: bool,
+    /// Bumped to stop the running playback loop.
+    play_gen: u64,
     typeset: Option<Typeset>,
     palette: Entity<CommandPalette>,
     toaster: Entity<Toaster>,
@@ -216,7 +251,7 @@ impl Darkroom {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut room = Self {
             settings: Settings::load(),
-            photo: Photo { name: "sample".into(), path: None, print: studio::sample() },
+            photo: Photo::sample(),
             loading: false,
             roll: 0,
             developed: None,
@@ -228,6 +263,10 @@ impl Darkroom {
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
+            reel: None,
+            reel_job: None,
+            playing: false,
+            play_gen: 0,
             typeset: None,
             palette: cx.new(|cx| CommandPalette::new(window, cx)),
             toaster: cx.new(|_| Toaster::new()),
@@ -360,7 +399,7 @@ impl Darkroom {
             command("Export text…").group("File").icon(Icon::File).shortcut("Ctrl+Shift+E").on_run(run(|this, _, cx| this.export_text(cx))),
             command("Copy ASCII").group("File").icon(Icon::Copy).shortcut("Ctrl+Shift+C").on_run(run(|this, _, cx| this.copy_text(cx))),
             command("Back to the sample").group("File").icon(Icon::Refresh).on_run(run(|this, _, cx| {
-                this.photo = Photo { name: "sample".into(), path: None, print: studio::sample() };
+                this.photo = Photo::sample();
                 this.new_roll();
                 cx.notify();
             })),
@@ -538,14 +577,23 @@ impl Darkroom {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let p = path.clone();
-            let result = cx.background_executor().spawn(async move { studio::load(&p) }).await;
+            let result = cx.background_executor().spawn(async move { sequence::load(&p) }).await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(print) => {
+                    Ok(clip) => {
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "photo".into());
-                        this.photo = Photo { name, path: Some(path), print };
+                        if clip.truncated {
+                            this.toast(toast("Long animation").warning().message(format!("Only the first {} frames were loaded", clip.frames.len())), cx);
+                        }
+                        let animated = clip.is_animated();
+                        this.photo = Photo { name, path: Some(path), clip: Arc::new(clip), frame: 0 };
                         this.new_roll();
+                        if animated {
+                            this.play(cx);
+                        } else {
+                            this.playing = false;
+                        }
                     }
                     Err(why) => this.toast(toast("Couldn't open that").danger().message(why), cx),
                 }
@@ -562,6 +610,188 @@ impl Darkroom {
         self.roll += 1;
         self.developed = None;
         self.typeset = None;
+        self.reel = None;
+        self.tiles = None;
+    }
+
+    // ── Animation ────────────────────────────────────────────────────────
+
+    /// Everything the whole reel depends on.
+    fn reel_key(&self, cx: &App) -> u64 {
+        let r = &self.settings.recipe;
+        let colors: Vec<[u32; 3]> = self.palette_colors(cx).iter().map(|c| c.map(f32::to_bits)).collect();
+        key_of((self.roll, Self::adjust_key(self.adjust(cx)), r.cols, r.algo, r.strength.to_bits(), r.bias.to_bits(), r.seed, r.serpentine, r.space, r.stability.to_bits(), colors))
+    }
+
+    /// The developed reel, if it's current; otherwise start developing it
+    /// (one job at a time: a slider drag doesn't queue a job per step).
+    fn reel(&mut self, cx: &mut Context<Self>) -> Option<Arc<Vec<Art>>> {
+        let key = self.reel_key(cx);
+        if let Some((k, arts)) = &self.reel
+            && *k == key
+        {
+            return Some(arts.clone());
+        }
+        if self.reel_job.is_none() {
+            self.reel_job = Some(key);
+            let clip = self.photo.clip.clone();
+            let (a, colors, r) = (self.adjust(cx), self.palette_colors(cx), self.settings.recipe.clone());
+            cx.spawn(async move |this, cx| {
+                let arts = cx
+                    .background_executor()
+                    .spawn(async move { sequence::develop_all(&clip.frames, r.cols, a, &colors, r.params(), r.stability) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.reel_job = None;
+                    // A stale reel is dropped; the next frame starts a fresh one.
+                    if this.reel_key(cx) == key {
+                        this.reel = Some((key, Arc::new(arts)));
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        None
+    }
+
+    /// The current frame's delay, after the speed setting.
+    fn frame_delay(&self) -> u64 {
+        let ms = self.photo.clip.frames[self.photo.frame].delay_ms as f32 / self.settings.recipe.speed.max(0.05);
+        ms.round().max(10.) as u64
+    }
+
+    fn play(&mut self, cx: &mut Context<Self>) {
+        self.playing = true;
+        self.play_gen += 1;
+        let generation = self.play_gen;
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(Some(delay)) = this.update(cx, |this, _| (this.playing && this.play_gen == generation).then(|| this.frame_delay())) else { break };
+                cx.background_executor().timer(Duration::from_millis(delay)).await;
+                let still_playing = this.update(cx, |this, cx| {
+                    if !this.playing || this.play_gen != generation {
+                        return false;
+                    }
+                    this.photo.frame = (this.photo.frame + 1) % this.photo.frames();
+                    cx.notify();
+                    true
+                });
+                if !matches!(still_playing, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn pause(&mut self, cx: &mut Context<Self>) {
+        self.playing = false;
+        cx.notify();
+    }
+
+    fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        if self.photo.frames() < 2 {
+            return;
+        }
+        if self.playing { self.pause(cx) } else { self.play(cx) }
+    }
+
+    fn step(&mut self, by: isize, cx: &mut Context<Self>) {
+        let n = self.photo.frames() as isize;
+        if n < 2 {
+            return;
+        }
+        self.playing = false;
+        self.photo.frame = (self.photo.frame as isize + by).rem_euclid(n) as usize;
+        cx.notify();
+    }
+
+    /// The art for the frame on show: from the reel when it's ready (with
+    /// stability), else this frame alone.
+    fn current_art(&mut self, cx: &mut Context<Self>) -> (Rc<Art>, u64) {
+        if self.photo.frames() > 1
+            && let Some(reel) = self.reel(cx)
+        {
+            let frame = self.photo.frame.min(reel.len() - 1);
+            let key = key_of(("reel", self.reel.as_ref().map(|r| r.0), frame));
+            return (Rc::new(reel[frame].clone()), key);
+        }
+        let art = self.developed(cx);
+        (art, self.developed.as_ref().map(|d| key_of(&d.key)).unwrap_or_default())
+    }
+
+    fn export_anim(&mut self, what: AnimOut, cx: &mut Context<Self>) {
+        let key = self.reel_key(cx);
+        let ready = self.reel.as_ref().filter(|(k, _)| *k == key).map(|(_, arts)| arts.clone());
+        let clip = self.photo.clip.clone();
+        let (a, colors, r) = (self.adjust(cx), self.palette_colors(cx), self.settings.recipe.clone());
+        let (ext, label): (&str, &'static str) = match what {
+            AnimOut::Gif => ("gif", "GIF"),
+            AnimOut::Apng => ("png", "APNG"),
+            AnimOut::Sheet => ("png", "Sprite sheet"),
+        };
+        let suffix = if matches!(what, AnimOut::Sheet) { "-sheet" } else { "" };
+        let name = format!("{}-{}-{}{suffix}.{ext}", self.stem(), r.algo.key(), r.palette);
+        self.toast(toast(format!("Making the {label}…")).message(format!("{} frames", clip.frames.len())), cx);
+        cx.spawn(async move |this, cx| {
+            let bytes = cx
+                .background_executor()
+                .spawn(async move {
+                    let arts = match ready {
+                        Some(arts) => arts,
+                        None => Arc::new(sequence::develop_all(&clip.frames, r.cols, a, &colors, r.params(), r.stability)),
+                    };
+                    let delays = sequence::delays(&clip.frames, r.speed);
+                    match what {
+                        AnimOut::Gif => sequence::gif(&arts, &delays, r.scale, r.look()),
+                        AnimOut::Apng => sequence::apng(&arts, &delays, r.scale, r.look()),
+                        AnimOut::Sheet => sequence::sprite_sheet(&arts, r.scale, r.look()),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match bytes {
+                Ok(bytes) => this.save_as(name, bytes, label, cx),
+                Err(why) => this.toast(toast(format!("Couldn't make the {label}")).danger().message(why), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Play/pause, the frame scrubber, and where we are.
+    fn timeline(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let n = self.photo.frames();
+        let frame = self.photo.frame;
+        let p = palette(cx);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(
+                Button::new("play")
+                    .label(if self.playing { "Pause" } else { "Play" })
+                    .secondary()
+                    .small()
+                    .shortcut("Space")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_play(cx))),
+            )
+            .child(
+                slider("frame-slider")
+                    .range(0., (n - 1) as f32)
+                    .step(1.)
+                    .value(frame as f32)
+                    .width(px(260.))
+                    .format(move |v| format!("{}/{n}", v as usize + 1).into())
+                    .on_change(cx.listener(|this, v: &f32, _, cx| {
+                        this.playing = false;
+                        this.photo.frame = (*v as usize).min(this.photo.frames() - 1);
+                        cx.notify();
+                    })),
+            )
+            .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(format!("{} ms", self.frame_delay())))
+            .when(self.reel_job.is_some(), |el| el.child(spinner("reel-spinner")).child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("developing every frame")))
     }
 
     fn adjust(&self, cx: &App) -> Adjust {
@@ -613,6 +843,7 @@ impl Darkroom {
         let s = &self.settings;
         let colors = self.palette_colors(cx);
         let key = DevKey {
+            frame: self.photo.frame,
             cols: s.recipe.cols,
             adjust: Self::adjust_key(a).0,
             invert: a.invert,
@@ -630,7 +861,7 @@ impl Darkroom {
             return d.art.clone();
         }
         let params = s.recipe.params();
-        let art = Rc::new(studio::develop(&self.photo.print, s.recipe.cols, a, colors, params));
+        let art = Rc::new(studio::develop(&self.photo.print(), s.recipe.cols, a, colors, params));
         self.developed = Some(Developed { key, art: art.clone() });
         art
     }
@@ -655,7 +886,7 @@ impl Darkroom {
         {
             return tiles.clone();
         }
-        let print = &self.photo.print;
+        let print = &self.photo.print();
         let tiles: Vec<Tile> = match self.sheet {
             SheetKind::Algorithms => Algo::ALL
                 .iter()
@@ -683,7 +914,7 @@ impl Darkroom {
         match &self.typeset {
             Some((k, lines)) if *k == key => lines.clone(),
             _ => {
-                let lines = studio::ascii_lines(&self.photo.print, key.0, a, s.recipe.charset, s.recipe.fit);
+                let lines = studio::ascii_lines(&self.photo.print(), key.0, a, s.recipe.charset, s.recipe.fit);
                 self.typeset = Some((key, lines.clone()));
                 lines
             }
@@ -723,7 +954,7 @@ impl Darkroom {
     }
 
     fn export_png(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let art = self.developed(cx);
+        let (art, _) = self.current_art(cx);
         match render::png(&art, self.settings.recipe.scale, self.settings.recipe.look()) {
             Ok(bytes) => {
                 let name = format!("{}-{}-{}.png", self.stem(), self.settings.recipe.algo.key(), self.settings.recipe.palette);
@@ -755,18 +986,18 @@ impl Darkroom {
         match self.settings.recipe.mode {
             Mode::Dither if self.view == View::Sheet => self.sheet_view(room_w, room_h, window, cx).into_any_element(),
             Mode::Dither => {
-                let art = self.developed(cx);
+                let (art, dev) = self.current_art(cx);
                 let (w, h) = (art.w, art.h);
                 // Whole device pixels per art pixel, so the preview is the export.
                 let sf = window.scale_factor();
+                let room_h = if self.photo.frames() > 1 { room_h - 44. } else { room_h };
                 let cell = ((room_w / w as f32).min(room_h / h as f32) * sf).floor().max(1.) as u32;
                 let look = self.settings.recipe.look();
-                let dev = self.developed.as_ref().map(|d| key_of(&d.key)).unwrap_or_default();
                 let after = self.tex.get(key_of(("after", dev, cell, look.bits())), || render::bgra(&art, cell, look));
                 let (dw, dh) = (w * cell, h * cell);
                 if self.view == View::Compare {
-                    let print = &self.photo.print;
-                    let before = self.tex.get(key_of(("before", self.roll, w, h, cell)), || render::before_bgra(print, w, h, cell));
+                    let print = &self.photo.print();
+                    let before = self.tex.get(key_of(("before", self.roll, self.photo.frame, w, h, cell)), || render::before_bgra(print, w, h, cell));
                     return compare(before, after, dw, dh, sf, self.split, hsla(p.accent)).into_any_element();
                 }
                 develop(("print", self.roll), self.roll, texture(after, dw, dh, sf)).into_any_element()
@@ -948,6 +1179,37 @@ impl Darkroom {
             ))
     }
 
+    fn anim_controls(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let r = &self.settings.recipe;
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                field("stability", "Stability")
+                    .hint("Holds pixels that didn't change since the last frame, so diffusion doesn't shimmer")
+                    .stacked()
+                    .child(
+                        slider("stability-slider")
+                            .range(0., 1.)
+                            .step(0.05)
+                            .value(r.stability)
+                            .width(px(220.))
+                            .format(|v| if v <= 0. { "off".into() } else { format!("{:.0}%", v * 100.).into() })
+                            .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.stability = *v, cx))),
+                    ),
+            )
+            .child(field("speed", "Speed").stacked().child(
+                slider("speed-slider")
+                    .range(0.25, 4.)
+                    .step(0.25)
+                    .value(r.speed)
+                    .width(px(220.))
+                    .format(|v| format!("{v:.2}x").into())
+                    .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.speed = *v, cx))),
+            ))
+    }
+
     /// The preset row, the colours it gives, and how they're matched.
     fn palette_picker(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let s = &self.settings;
@@ -1111,7 +1373,24 @@ impl Darkroom {
                 )),
         };
 
+        let animated = self.photo.frames() > 1;
         let exports = match mode {
+            Mode::Dither if animated => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Button::new("export-gif").label("Export GIF").icon(Icon::File).primary().full_width().shortcut("Ctrl+E").on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Gif, cx),
+                )))
+                .child(Button::new("export-apng").label("Export APNG").icon(Icon::File).secondary().full_width().on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Apng, cx),
+                )))
+                .child(Button::new("export-sheet").label("Export sprite sheet").icon(Icon::File).secondary().full_width().on_click(cx.listener(
+                    |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Sheet, cx),
+                )))
+                .child(Button::new("export-frame").label("Export this frame").icon(Icon::File).ghost().full_width().on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| this.export_png(window, cx),
+                ))),
             Mode::Dither => div()
                 .flex()
                 .flex_col()
@@ -1176,6 +1455,7 @@ impl Darkroom {
                     ))
                     .child(switch("invert").label("Invert").checked(s.recipe.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.invert = *on, window, cx))))
                     .when(mode == Mode::Dither, |el| el.child(rule(Some("render"), window, cx)).child(self.render_controls(cx)))
+                    .when(mode == Mode::Dither && animated, |el| el.child(rule(Some("animation"), window, cx)).child(self.anim_controls(cx)))
                     .child(rule(Some("palette"), window, cx))
                     .when(mode == Mode::Dither, |el| el.child(self.palette_picker(cx)))
                     .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(
@@ -1217,15 +1497,16 @@ impl Darkroom {
 impl Render for Darkroom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let (w, h) = (self.photo.print.w, self.photo.print.h);
+        let (w, h) = (self.photo.print().w, self.photo.print().h);
         let size_meta = match self.settings.recipe.mode {
-            Mode::Dither => format!("{} · {}×{} px", self.photo.name, self.settings.recipe.cols, studio::rows_for(&self.photo.print, self.settings.recipe.cols)),
+            Mode::Dither => format!("{} · {}×{} px", self.photo.name, self.settings.recipe.cols, studio::rows_for(&self.photo.print(), self.settings.recipe.cols)),
             Mode::Ascii => format!("{} · {} ch", self.photo.name, self.settings.recipe.ascii_cols),
         };
         self.tex.begin();
         let preview = self.preview(window, cx);
         self.tex.end(window);
         let view_bar = (self.settings.recipe.mode == Mode::Dither).then(|| self.view_bar(cx));
+        let timeline = (self.photo.frames() > 1 && self.view != View::Sheet).then(|| self.timeline(cx));
         let drop_hint = hsla(p.raised);
         let print = panel("Print").meta(size_meta).flex_1().min_w_0().min_h_0().children(view_bar.map(|bar| div().px_2().pb_2().child(bar))).child(
             div()
@@ -1246,9 +1527,10 @@ impl Render for Darkroom {
                 }))
                 .child(if self.loading { spinner("loading").into_any_element() } else { preview })
                 .when(self.photo.path.is_none() && self.view != View::Sheet, |el| {
-                    el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("A sample print. Drop a photo here, or open one with Ctrl+O."))
+                    el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("A sample print. Drop a photo or a GIF here, or open one with Ctrl+O."))
                 }),
-        );
+        )
+        .children(timeline.map(|t| div().px_2().pt_2().child(t)));
 
         let open = Button::new("open").label("Open").icon(Icon::Folder).ghost().small().shortcut("Ctrl+O").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open(cx)));
         let sidebar = self.sidebar(window, cx);
@@ -1268,7 +1550,16 @@ impl Render for Darkroom {
                 .on_action(cx.listener(|this, _: &SaveRecipe, _, cx| this.save_recipe(cx)))
                 .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
                 .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
-                .on_action(cx.listener(|this, _: &ExportPng, window, cx| this.export_png(window, cx)))
+                .on_action(cx.listener(|this, _: &ExportPng, window, cx| {
+                    if this.photo.frames() > 1 && this.settings.recipe.mode == Mode::Dither {
+                        this.export_anim(AnimOut::Gif, cx)
+                    } else {
+                        this.export_png(window, cx)
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &PlayPause, _, cx| this.toggle_play(cx)))
+                .on_action(cx.listener(|this, _: &NextFrame, _, cx| this.step(1, cx)))
+                .on_action(cx.listener(|this, _: &PrevFrame, _, cx| this.step(-1, cx)))
                 .on_action(cx.listener(|this, _: &ExportText, _, cx| this.export_text(cx)))
                 .on_action(cx.listener(|this, _: &CopyText, _, cx| this.copy_text(cx)))
                 .on_action(cx.listener(|this, _: &Invert, window, cx| this.change(|s| s.recipe.invert = !s.recipe.invert, window, cx)))
@@ -1283,6 +1574,7 @@ impl Render for Darkroom {
                             Mode::Ascii => format!("ASCII · {}", self.settings.recipe.charset.name().to_uppercase()),
                         })
                         .left(format!("SOURCE {w}×{h}"))
+                        .when(self.photo.frames() > 1, |bar| bar.right_live(format!("FRAME {}/{}", self.photo.frame + 1, self.photo.frames())))
                         .right(theme::scheme(cx).name.to_uppercase())
                         .right_live(format!("{}FPS", motion::fps())),
                 ),
@@ -1290,7 +1582,7 @@ impl Render for Darkroom {
     }
 }
 
-gpui::actions!(darkroom, [Open, OpenRecipe, SaveRecipe, ExportPng, ExportText, CopyText, Invert, Undo, Redo]);
+gpui::actions!(darkroom, [Open, OpenRecipe, SaveRecipe, ExportPng, ExportText, CopyText, Invert, Undo, Redo, PlayPause, NextFrame, PrevFrame]);
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
@@ -1303,6 +1595,9 @@ fn main() {
             KeyBinding::new("ctrl-z", Undo, None),
             KeyBinding::new("ctrl-shift-z", Redo, None),
             KeyBinding::new("ctrl-y", Redo, None),
+            KeyBinding::new("space", PlayPause, None),
+            KeyBinding::new(".", NextFrame, None),
+            KeyBinding::new(",", PrevFrame, None),
             KeyBinding::new("ctrl-e", ExportPng, None),
             KeyBinding::new("ctrl-shift-e", ExportText, None),
             KeyBinding::new("ctrl-shift-c", CopyText, None),
