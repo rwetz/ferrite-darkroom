@@ -1,0 +1,21 @@
+Darkroom
+Copyright 2026 Ryan Wetzstein
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Built on ferrite-design (https://github.com/rwetz/ferrite-design), which
+compiles the following third-party fonts into every binary. They are NOT
+covered by the Apache License above; each keeps its own license.
+
+  PxPlus IBM VGA 8x16
+    From "The Ultimate Oldschool PC Font Pack" v2.2
+    (c) 2016-2020 VileR — https://int10h.org/oldschool-pc-fonts/
+    Licensed under Creative Commons Attribution-ShareAlike 4.0
+    International (CC BY-SA 4.0).
+
+  JetBrains Mono 2.304
+    (c) 2020 The JetBrains Mono Project Authors —
+    https://github.com/JetBrains/JetBrainsMono
+    Licensed under the SIL Open Font License, Version 1.1.
+
+The license texts ship with ferrite-design in assets/fonts/ and are
+included in every Darkroom release archive.
