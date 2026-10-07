@@ -1,0 +1,8 @@
+# A Darkroom recipe: black dots on white, like a newspaper photo.
+mode = "dither"
+algorithm = "halftone"
+palette = "bw"
+cols = 320
+scale = 2
+contrast = 1.10
+gamma = 1.20

@@ -1,0 +1,9 @@
+# A Darkroom recipe: a photo as a Game Boy screen. Open it in Darkroom
+# (Ctrl+Shift+O, or drop it on the print).
+mode = "dither"
+algorithm = "bayer"
+palette = "gameboy"
+strength = 1.00
+cols = 160
+scale = 4
+contrast = 1.20

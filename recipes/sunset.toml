@@ -1,0 +1,9 @@
+# A Darkroom recipe: a warm seven-colour pixel-art palette under an 8×8
+# Bayer screen, nudged toward the light.
+mode = "dither"
+algorithm = "bayer-8"
+palette = "custom"
+colors = ["#1a1c2c", "#5d275d", "#b13e53", "#ef7d57", "#ffcd75", "#41a6f6", "#f4f4f4"]
+bias = 0.20
+cols = 220
+scale = 4

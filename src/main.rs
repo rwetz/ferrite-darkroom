@@ -1,31 +1,36 @@
 //! Darkroom: a Ferrite dither studio.
 //!
-//! Drop in a photo (or open one) and develop it as pixel art with Ferrite's
-//! own dither masks — ordered Bayer, blue noise, Atkinson diffusion — or as
-//! ASCII with Ferrite's glyph-fitted character sets. The art takes the
-//! colours of the scheme you pick. Export a PNG or a text file.
+//! Drop in a photo (or open one) and develop it as pixel art — twenty
+//! dither algorithms (error diffusion and ordered) into the scheme's own
+//! ink or a preset palette (Game Boy, C64, CMYK…) — or as ASCII with
+//! Ferrite's glyph-fitted character sets. Export a PNG or a text file.
 //!
 //!     cargo run
 //!     cargo run -- photo.jpg
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod engine;
+mod palettes;
+mod recipe;
 mod settings;
 mod studio;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ferrite_design::ascii::{Charset, Fit};
-use ferrite_design::dither::Picture;
 use gpui::{
-    App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, ExternalPaths, IntoElement, KeyBinding, PathPromptOptions, Render,
-    Rgba, Subscription, Window, div, px, size,
+    App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corners, Entity, ExternalPaths, IntoElement, KeyBinding,
+    PathPromptOptions, Render, RenderImage, Rgba, Subscription, Window, canvas, div, point, px, size,
 };
 use ferrite_design::prelude::*;
 
-use settings::{Mode, PATTERNS, Settings};
-use studio::{Adjust, Print};
+use engine::{Algo, Rgb, Space};
+use recipe::{Mode, Recipe};
+use settings::Settings;
+use studio::{Adjust, Art, Print};
 
 const APPEARANCES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
 const SCALES: [u32; 4] = [1, 2, 4, 8];
@@ -39,9 +44,30 @@ struct Photo {
     print: Print,
 }
 
-/// The developed picture and what it was developed with.
-type Developed = ((u32, [u32; 2], bool, bool), Picture);
-type Typeset = ((usize, [u32; 2], bool, bool, Charset, Fit), Rc<Vec<String>>);
+/// Everything a dither depends on, compared bit for bit to skip redevelops.
+#[derive(Clone, PartialEq)]
+struct DevKey {
+    cols: u32,
+    adjust: [u32; 3],
+    invert: bool,
+    algo: Algo,
+    strength: u32,
+    bias: u32,
+    seed: u32,
+    serpentine: bool,
+    space: Space,
+    palette: Vec<[u32; 3]>,
+}
+
+/// The developed art, and the texture the preview last uploaded for it.
+struct Developed {
+    key: DevKey,
+    art: Rc<Art>,
+    /// `(cell, image)`; rebuilt when the cell size changes.
+    shown: Option<(u32, Arc<RenderImage>)>,
+}
+
+type Typeset = ((usize, [u32; 3], bool, bool, Charset, Fit), Rc<Vec<String>>);
 
 struct Darkroom {
     settings: Settings,
@@ -50,6 +76,8 @@ struct Darkroom {
     /// Bumped per photo, to replay the develop effect.
     roll: u64,
     developed: Option<Developed>,
+    /// Textures replaced since the last frame, to free from the GPU atlas.
+    stale: Vec<Arc<RenderImage>>,
     typeset: Option<Typeset>,
     palette: Entity<CommandPalette>,
     toaster: Entity<Toaster>,
@@ -64,6 +92,7 @@ impl Darkroom {
             loading: false,
             roll: 0,
             developed: None,
+            stale: Vec::new(),
             typeset: None,
             palette: cx.new(|cx| CommandPalette::new(window, cx)),
             toaster: cx.new(|_| Toaster::new()),
@@ -109,6 +138,13 @@ impl Darkroom {
         self.save(cx);
     }
 
+    /// Change only the recipe: no look to reapply, so no window needed
+    /// (async results land here).
+    fn set_recipe(&mut self, f: impl FnOnce(&mut Recipe), cx: &mut Context<Self>) {
+        f(&mut self.settings.recipe);
+        self.save(cx);
+    }
+
     fn toast(&self, t: Toast, cx: &mut Context<Self>) {
         self.toaster.update(cx, |toaster, cx| toaster.push(t, cx));
     }
@@ -123,6 +159,11 @@ impl Darkroom {
         };
         let mut commands = vec![
             command("Open photo…").group("File").icon(Icon::Folder).shortcut("Ctrl+O").on_run(run(|this, _, cx| this.open(cx))),
+            command("Open recipe…").group("Recipe").icon(Icon::Folder).shortcut("Ctrl+Shift+O").on_run(run(|this, _, cx| this.open_recipe(cx))),
+            command("Save recipe…").group("Recipe").icon(Icon::File).shortcut("Ctrl+S").on_run(run(|this, _, cx| this.save_recipe(cx))),
+            command("Import palette…").group("Recipe").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_palette(cx))),
+            command("Paste palette").group("Recipe").icon(Icon::Copy).on_run(run(|this, _, cx| this.paste_palette(cx))),
+            command("New random seed").group("Develop").icon(Icon::Refresh).on_run(run(|this, _, cx| this.reseed(cx))),
             command("Export PNG…").group("File").icon(Icon::File).shortcut("Ctrl+E").on_run(run(|this, window, cx| this.export_png(window, cx))),
             command("Export text…").group("File").icon(Icon::File).shortcut("Ctrl+Shift+E").on_run(run(|this, _, cx| this.export_text(cx))),
             command("Copy ASCII").group("File").icon(Icon::Copy).shortcut("Ctrl+Shift+C").on_run(run(|this, _, cx| this.copy_text(cx))),
@@ -131,15 +172,16 @@ impl Darkroom {
                 this.new_roll();
                 cx.notify();
             })),
-            command("Dither").group("Develop").on_run(run(|this, window, cx| this.change(|s| s.mode = Mode::Dither, window, cx))),
-            command("ASCII").group("Develop").on_run(run(|this, window, cx| this.change(|s| s.mode = Mode::Ascii, window, cx))),
-            command("Invert").group("Develop").shortcut("Ctrl+I").on_run(run(|this, window, cx| this.change(|s| s.invert = !s.invert, window, cx))),
+            command("Dither").group("Develop").on_run(run(|this, window, cx| this.change(|s| s.recipe.mode = Mode::Dither, window, cx))),
+            command("ASCII").group("Develop").on_run(run(|this, window, cx| this.change(|s| s.recipe.mode = Mode::Ascii, window, cx))),
+            command("Invert").group("Develop").shortcut("Ctrl+I").on_run(run(|this, window, cx| this.change(|s| s.recipe.invert = !s.recipe.invert, window, cx))),
             command("Reset tone").group("Develop").on_run(run(|this, window, cx| {
                 this.change(
                     |s| {
-                        s.brightness = 0.;
-                        s.contrast = 1.;
-                        s.invert = false;
+                        s.recipe.brightness = 0.;
+                        s.recipe.contrast = 1.;
+                        s.recipe.gamma = 1.;
+                        s.recipe.invert = false;
                     },
                     window,
                     cx,
@@ -150,14 +192,29 @@ impl Darkroom {
             command("Dark theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "dark".into(), window, cx))),
             command("Light theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "light".into(), window, cx))),
         ];
-        for (pattern, _, label) in PATTERNS {
+        for algo in Algo::ALL {
             let weak = weak.clone();
-            commands.push(command(format!("Pattern: {label}")).group("Develop").on_run(move |window, cx| {
+            commands.push(command(format!("Algorithm: {}", algo.name())).group("Develop").on_run(move |window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     this.change(
                         |s| {
-                            s.mode = Mode::Dither;
-                            s.pattern = pattern;
+                            s.recipe.mode = Mode::Dither;
+                            s.recipe.algo = algo;
+                        },
+                        window,
+                        cx,
+                    )
+                });
+            }));
+        }
+        for preset in palettes::PRESETS {
+            let weak = weak.clone();
+            commands.push(command(format!("Palette: {}", preset.name)).group("Develop").on_run(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.change(
+                        |s| {
+                            s.recipe.mode = Mode::Dither;
+                            s.recipe.palette = preset.key.into();
                         },
                         window,
                         cx,
@@ -171,9 +228,9 @@ impl Darkroom {
                 let _ = weak.update(cx, |this, cx| {
                     this.change(
                         |s| {
-                            s.mode = Mode::Ascii;
-                            s.charset = charset;
-                            s.fit = charset.default_fit();
+                            s.recipe.mode = Mode::Ascii;
+                            s.recipe.charset = charset;
+                            s.recipe.fit = charset.default_fit();
                         },
                         window,
                         cx,
@@ -192,19 +249,99 @@ impl Darkroom {
 
     // ── Photos in ────────────────────────────────────────────────────────
 
-    fn open(&mut self, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Develop".into()) });
+    /// Ask for one file, then hand it to `then`.
+    fn ask_path(&self, prompt: &str, then: fn(&mut Self, PathBuf, &mut Context<Self>), cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(prompt.to_string().into()) });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await
                 && let Some(path) = paths.into_iter().next()
             {
-                let _ = this.update(cx, |this, cx| this.open_path(path, cx));
+                let _ = this.update(cx, |this, cx| then(this, path, cx));
             }
         })
         .detach();
     }
 
+    fn open(&mut self, cx: &mut Context<Self>) {
+        self.ask_path("Develop", Self::open_path, cx);
+    }
+
+    fn open_recipe(&mut self, cx: &mut Context<Self>) {
+        self.ask_path("Open recipe", Self::open_path, cx);
+    }
+
+    fn import_palette(&mut self, cx: &mut Context<Self>) {
+        self.ask_path("Import palette", Self::import_palette_path, cx);
+    }
+
+    /// Whatever arrived (dropped, opened, or on the command line): a recipe,
+    /// a palette file, or a photo, by its extension.
     fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        match ext.as_str() {
+            "toml" => self.open_recipe_path(path, cx),
+            "gpl" | "pal" | "hex" | "txt" => self.import_palette_path(path, cx),
+            _ => self.open_photo(path, cx),
+        }
+    }
+
+    fn open_recipe_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let result = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|src| Recipe::from_toml(&src));
+        match result {
+            Ok(recipe) => {
+                self.set_recipe(|r| *r = recipe, cx);
+                let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.toast(toast("Recipe applied").success().message(name), cx);
+            }
+            Err(why) => self.toast(toast("Couldn't open that recipe").danger().message(why), cx),
+        }
+    }
+
+    fn save_recipe(&mut self, cx: &mut Context<Self>) {
+        let r = &self.settings.recipe;
+        let name = format!("{}-{}-{}.toml", self.stem(), r.algo.key(), r.palette);
+        self.save_as(name, r.to_toml().into_bytes(), "Recipe", cx);
+    }
+
+    fn use_palette(&mut self, colors: Result<Vec<Rgb>, String>, cx: &mut Context<Self>) {
+        match colors {
+            Ok(colors) => {
+                let n = colors.len();
+                self.set_recipe(
+                    |r| {
+                        r.mode = Mode::Dither;
+                        r.palette = palettes::CUSTOM.into();
+                        r.colors = colors;
+                    },
+                    cx,
+                );
+                self.toast(toast("Palette imported").success().message(format!("{n} colours")), cx);
+            }
+            Err(why) => self.toast(toast("Couldn't use that palette").danger().message(why), cx),
+        }
+    }
+
+    fn import_palette_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let colors = palettes::load(&path);
+        self.use_palette(colors, cx);
+    }
+
+    fn paste_palette(&mut self, cx: &mut Context<Self>) {
+        let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+        self.use_palette(palettes::parse(&text), cx);
+    }
+
+    fn reseed(&mut self, cx: &mut Context<Self>) {
+        self.set_recipe(
+            |r| {
+                r.seed = r.seed.wrapping_mul(1_103_515_245).wrapping_add(12_345) % 1_000_000;
+                r.algo = Algo::Random;
+            },
+            cx,
+        );
+    }
+
+    fn open_photo(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.loading = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -238,38 +375,104 @@ impl Darkroom {
     fn adjust(&self, cx: &App) -> Adjust {
         let p = palette(cx);
         let s = &self.settings;
-        let ink = hsla(if s.accent_ink { p.accent } else { p.fg });
-        Adjust { brightness: s.brightness, contrast: s.contrast, invert: s.invert, light_ink: ink.l > hsla(p.bg).l }
+        let ink = hsla(if s.recipe.accent_ink { p.accent } else { p.fg });
+        Adjust { brightness: s.recipe.brightness, contrast: s.recipe.contrast, gamma: s.recipe.gamma, invert: s.recipe.invert, light_ink: ink.l > hsla(p.bg).l }
     }
 
-    fn adjust_key(a: Adjust) -> ([u32; 2], bool, bool) {
-        ([a.brightness.to_bits(), a.contrast.to_bits()], a.invert, a.light_ink)
+    fn adjust_key(a: Adjust) -> ([u32; 3], bool, bool) {
+        ([a.brightness.to_bits(), a.contrast.to_bits(), a.gamma.to_bits()], a.invert, a.light_ink)
     }
 
-    /// The dither picture, developed again only when something changed.
-    fn developed(&mut self, cx: &App) -> Picture {
-        let a = self.adjust(cx);
-        let (b, inv, light) = Self::adjust_key(a);
-        let key = (self.settings.cols, b, inv, light);
-        match &self.developed {
-            Some((k, pic)) if *k == key => pic.clone(),
-            _ => {
-                let pic = studio::picture(&self.photo.print, self.settings.cols, a);
-                self.developed = Some((key, pic.clone()));
-                pic
-            }
+    /// The scheme's paper and ink, as the `Scheme` palette uses them.
+    fn scheme_inks(&self, cx: &App) -> (Rgb, Rgb) {
+        let p = palette(cx);
+        let rgb = |c: gpui::Hsla| {
+            let c = Rgba::from(c);
+            [c.r, c.g, c.b]
+        };
+        (rgb(hsla(p.bg)), rgb(hsla(if self.settings.recipe.accent_ink { p.accent } else { p.fg })))
+    }
+
+    fn preset(&self) -> &'static palettes::Preset {
+        palettes::by_key(&self.settings.recipe.palette).unwrap_or(&palettes::PRESETS[0])
+    }
+
+    /// The custom palette, when it's chosen and has its colours.
+    fn custom(&self) -> Option<&[Rgb]> {
+        let r = &self.settings.recipe;
+        (r.palette == palettes::CUSTOM && r.colors.len() >= 2).then_some(r.colors.as_slice())
+    }
+
+    fn palette_name(&self) -> &'static str {
+        if self.custom().is_some() { "Custom" } else { self.preset().name }
+    }
+
+    fn palette_colors(&self, cx: &App) -> Vec<Rgb> {
+        if let Some(colors) = self.custom() {
+            return colors.to_vec();
         }
+        let (paper, ink) = self.scheme_inks(cx);
+        self.preset().colors(paper, ink)
+    }
+
+    /// The dither, developed again only when something changed.
+    fn developed(&mut self, cx: &App) -> Rc<Art> {
+        let a = self.adjust(cx);
+        let s = &self.settings;
+        let colors = self.palette_colors(cx);
+        let key = DevKey {
+            cols: s.recipe.cols,
+            adjust: Self::adjust_key(a).0,
+            invert: a.invert,
+            algo: s.recipe.algo,
+            strength: s.recipe.strength.to_bits(),
+            bias: s.recipe.bias.to_bits(),
+            seed: s.recipe.seed,
+            serpentine: s.recipe.serpentine,
+            space: s.recipe.space,
+            palette: colors.iter().map(|c| c.map(f32::to_bits)).collect(),
+        };
+        if let Some(d) = &self.developed
+            && d.key == key
+        {
+            return d.art.clone();
+        }
+        let params = s.recipe.params();
+        let art = Rc::new(studio::develop(&self.photo.print, s.recipe.cols, a, colors, params));
+        if let Some(old) = self.developed.take().and_then(|d| d.shown) {
+            self.stale.push(old.1);
+        }
+        self.developed = Some(Developed { key, art: art.clone(), shown: None });
+        art
+    }
+
+    /// The preview texture for the current art at `cell` device px per pixel.
+    fn shown(&mut self, cell: u32, cx: &App) -> Arc<RenderImage> {
+        let art = self.developed(cx);
+        let d = self.developed.as_mut().expect("developed above");
+        if let Some((c, image)) = &d.shown
+            && *c == cell
+        {
+            return image.clone();
+        }
+        let (w, h, bytes) = art.bgra(cell);
+        let buffer = image::RgbaImage::from_raw(w, h, bytes).expect("bgra size matches");
+        let image = Arc::new(RenderImage::new([image::Frame::new(buffer)]));
+        if let Some((_, old)) = d.shown.replace((cell, image.clone())) {
+            self.stale.push(old);
+        }
+        image
     }
 
     fn typeset(&mut self, cx: &App) -> Rc<Vec<String>> {
         let a = self.adjust(cx);
         let (b, inv, light) = Self::adjust_key(a);
         let s = &self.settings;
-        let key = (s.ascii_cols as usize, b, inv, light, s.charset, s.fit);
+        let key = (s.recipe.ascii_cols as usize, b, inv, light, s.recipe.charset, s.recipe.fit);
         match &self.typeset {
             Some((k, lines)) if *k == key => lines.clone(),
             _ => {
-                let lines = studio::ascii_lines(&self.photo.print, key.0, a, s.charset, s.fit);
+                let lines = studio::ascii_lines(&self.photo.print, key.0, a, s.recipe.charset, s.recipe.fit);
                 self.typeset = Some((key, lines.clone()));
                 lines
             }
@@ -309,17 +512,11 @@ impl Darkroom {
     }
 
     fn export_png(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let p = palette(cx);
-        let rgb = |c: gpui::Hsla| {
-            let c = Rgba::from(c);
-            [c.r, c.g, c.b].map(|v| (v * 255.).round() as u8)
-        };
-        let (ink, paper) = (rgb(hsla(if self.settings.accent_ink { p.accent } else { p.fg })), rgb(hsla(p.bg)));
-        let pic = self.developed(cx);
-        match studio::png(&pic, self.settings.pattern, self.settings.scale, ink, paper) {
+        let art = self.developed(cx);
+        match art.png(self.settings.recipe.scale) {
             Ok(bytes) => {
-                let pattern = PATTERNS.iter().find(|x| x.0 == self.settings.pattern).map(|x| x.1).unwrap_or("dither");
-                self.save_as(format!("{}-{pattern}.png", self.stem()), bytes, "PNG", cx);
+                let name = format!("{}-{}-{}.png", self.stem(), self.settings.recipe.algo.key(), self.settings.recipe.palette);
+                self.save_as(name, bytes, "PNG", cx);
             }
             Err(why) => self.toast(toast("Couldn't make the PNG").danger().message(why), cx),
         }
@@ -340,24 +537,35 @@ impl Darkroom {
 
     fn preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let p = palette(cx);
-        let ink = hsla(if self.settings.accent_ink { p.accent } else { p.fg });
+        let ink = hsla(if self.settings.recipe.accent_ink { p.accent } else { p.fg });
         // The room the print has: the window less the sidebar, chrome and padding.
         let view = window.viewport_size();
         let (room_w, room_h) = (f32::from(view.width) - SIDEBAR - 72., f32::from(view.height) - 150.);
-        match self.settings.mode {
+        match self.settings.recipe.mode {
             Mode::Dither => {
-                let pic = self.developed(cx);
-                let (w, h) = pic.size();
+                let art = self.developed(cx);
+                let (w, h) = (art.w, art.h);
                 // Whole device pixels per art pixel, so the preview is the export.
                 let sf = window.scale_factor();
-                let cell = ((room_w / w as f32).min(room_h / h as f32) * sf).floor().max(1.);
-                let (ew, eh) = (w as f32 * cell / sf, h as f32 * cell / sf);
-                develop(
-                    ("print", self.roll),
-                    self.roll,
-                    dither(pic).pattern(self.settings.pattern).ink(ink).paper(hsla(p.bg)).cell(cell as u32).w(px(ew)).h(px(eh)),
+                let cell = ((room_w / w as f32).min(room_h / h as f32) * sf).floor().max(1.) as u32;
+                let image = self.shown(cell, cx);
+                for old in self.stale.drain(..) {
+                    let _ = window.drop_image(old);
+                }
+                let (dw, dh) = (w * cell, h * cell);
+                let print = canvas(
+                    |_, _, _| {},
+                    move |bounds: Bounds<gpui::Pixels>, _, window: &mut Window, _| {
+                        // Snap to the device grid so texels land 1:1 on pixels.
+                        let sf = window.scale_factor();
+                        let origin = point(px((f32::from(bounds.origin.x) * sf).round() / sf), px((f32::from(bounds.origin.y) * sf).round() / sf));
+                        let target = Bounds::new(origin, size(px(dw as f32 / sf), px(dh as f32 / sf)));
+                        let _ = window.paint_image(target, target, Corners::default(), image, 0, false);
+                    },
                 )
-                .into_any_element()
+                .w(px(dw as f32 / sf))
+                .h(px(dh as f32 / sf));
+                develop(("print", self.roll), self.roll, print).into_any_element()
             }
             Mode::Ascii => {
                 let lines = self.typeset(cx);
@@ -379,34 +587,129 @@ impl Darkroom {
         }
     }
 
+    /// The preset row, the colours it gives, and how they're matched.
+    fn palette_picker(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let s = &self.settings;
+        let chips = palettes::PRESETS.iter().enumerate().map(|(i, preset)| {
+            let key = preset.key;
+            Button::new(("palette", i))
+                .label(preset.name)
+                .small()
+                .secondary()
+                .selected(s.recipe.palette == key)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.change(|s| s.recipe.palette = key.into(), window, cx)))
+        });
+        // The custom palette gets a chip once there is one to go back to.
+        let custom = (!s.recipe.colors.is_empty()).then(|| {
+            Button::new("palette-custom")
+                .label(format!("Custom ({})", s.recipe.colors.len()))
+                .small()
+                .secondary()
+                .selected(self.custom().is_some())
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_recipe(|r| r.palette = palettes::CUSTOM.into(), cx)))
+        });
+        // The swatches are the art's own colours, data rather than chrome.
+        let swatches = self.palette_colors(cx).into_iter().map(|[r, g, b]| div().w(px(14.)).h(px(14.)).bg(Rgba { r, g, b, a: 1. }));
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().flex().flex_row().flex_wrap().gap_1().children(chips).children(custom))
+            .child(div().flex().flex_row().flex_wrap().children(swatches))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(Button::new("import-palette").label("Import…").icon(Icon::Folder).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.import_palette(cx))))
+                    .child(Button::new("paste-palette").label("Paste hex").icon(Icon::Copy).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.paste_palette(cx)))),
+            )
+            .child(div().body(text::SM).text_color(hsla(palette(cx).fg_dim)).child("Lospec .hex, .gpl, .pal, .txt or a palette image; or copy hex colours and paste."))
+            .child(field("match", "Match colours").hint("Oklab compares as the eye does; RGB is cruder and punchier").stacked().child(
+                segmented("match-seg")
+                    .option("Oklab")
+                    .option("RGB")
+                    .selected(if s.recipe.space == Space::Rgb { 1 } else { 0 })
+                    .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.space = if *i == 1 { Space::Rgb } else { Space::Oklab }, window, cx))),
+            ))
+    }
+
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let s = &self.settings;
-        let mode = s.mode;
+        let mode = s.recipe.mode;
 
         let process = match mode {
             Mode::Dither => div()
                 .flex()
                 .flex_col()
                 .gap_3()
-                .child(field("pattern", "Pattern").stacked().child(
-                    PATTERNS.iter().fold(segmented("pattern-seg"), |seg, (_, _, l)| seg.option(*l))
-                        .selected(PATTERNS.iter().position(|x| x.0 == s.pattern).unwrap_or(0))
-                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.pattern = PATTERNS[*i].0, window, cx))),
+                .child(
+                    field("algo", "Algorithm")
+                        .hint(if s.recipe.algo.diffuses() { "Error diffusion: each pixel's error carries to its neighbours" } else { "Ordered: a threshold map, stable and tileable" })
+                        .stacked()
+                        .child(
+                            select("algo-select")
+                                .options(Algo::ALL.iter().map(|a| a.name()))
+                                .selected(Algo::ALL.iter().position(|a| *a == s.recipe.algo))
+                                .width(px(220.))
+                                .on_change(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.algo = Algo::ALL[*i], window, cx))),
+                        ),
+                )
+                .child(field("strength", "Strength").stacked().child(
+                    slider("strength-slider")
+                        .range(0., 2.)
+                        .step(0.05)
+                        .value(s.recipe.strength)
+                        .width(px(220.))
+                        .format(|v| format!("{:.0}%", v * 100.).into())
+                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.strength = *v, window, cx))),
                 ))
+                .child(
+                    field("bias", "Threshold")
+                        .hint(if s.recipe.algo.diffuses() { "Where ink starts; with diffusion it shifts texture more than tone" } else { "Where ink starts: left for less, right for more" })
+                        .stacked()
+                        .child(
+                            slider("bias-slider")
+                                .range(-1., 1.)
+                                .step(0.05)
+                                .value(s.recipe.bias)
+                                .width(px(220.))
+                                .format(|v| format!("{:+.0}", v * 100.).into())
+                                .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.bias = *v, window, cx))),
+                        ),
+                )
+                .when(s.recipe.algo == Algo::Random, |el| {
+                    el.child(
+                        Button::new("reseed")
+                            .label(format!("New seed ({})", s.recipe.seed))
+                            .icon(Icon::Refresh)
+                            .secondary()
+                            .small()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.reseed(cx))),
+                    )
+                })
+                .when(s.recipe.algo.diffuses(), |el| {
+                    el.child(
+                        switch("serpentine")
+                            .label("Serpentine")
+                            .checked(s.recipe.serpentine)
+                            .on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.serpentine = *on, window, cx))),
+                    )
+                })
                 .child(field("cols", "Width").stacked().child(
                     slider("cols-slider")
                         .range(32., 480.)
                         .step(8.)
-                        .value(s.cols as f32)
+                        .value(s.recipe.cols as f32)
                         .width(px(220.))
                         .format(|v| format!("{v:.0} px").into())
-                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.cols = *v as u32, window, cx))),
+                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.cols = *v as u32, window, cx))),
                 ))
                 .child(field("scale", "PNG pixel size").stacked().child(
                     SCALES.iter().fold(segmented("scale-seg"), |seg, x| seg.option(format!("{x}x")))
-                        .selected(SCALES.iter().position(|x| *x == s.scale).unwrap_or(2))
-                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.scale = SCALES[*i], window, cx))),
+                        .selected(SCALES.iter().position(|x| *x == s.recipe.scale).unwrap_or(2))
+                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.scale = SCALES[*i], window, cx))),
                 )),
             Mode::Ascii => div()
                 .flex()
@@ -415,14 +718,14 @@ impl Darkroom {
                 .child(field("charset", "Characters").stacked().child(
                     select("charset-select")
                         .options(Charset::ALL.iter().map(|c| c.name()))
-                        .selected(Charset::ALL.iter().position(|c| *c == s.charset))
+                        .selected(Charset::ALL.iter().position(|c| *c == s.recipe.charset))
                         .width(px(220.))
                         .on_change(cx.listener(|this, i: &usize, window, cx| {
                             let c = Charset::ALL[*i];
                             this.change(
                                 |s| {
-                                    s.charset = c;
-                                    s.fit = c.default_fit();
+                                    s.recipe.charset = c;
+                                    s.recipe.fit = c.default_fit();
                                 },
                                 window,
                                 cx,
@@ -433,17 +736,17 @@ impl Darkroom {
                     segmented("fit-seg")
                         .option("Shape")
                         .option("Tone")
-                        .selected(if s.fit == Fit::Tone { 1 } else { 0 })
-                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.fit = if *i == 1 { Fit::Tone } else { Fit::Shape }, window, cx))),
+                        .selected(if s.recipe.fit == Fit::Tone { 1 } else { 0 })
+                        .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.fit = if *i == 1 { Fit::Tone } else { Fit::Shape }, window, cx))),
                 ))
                 .child(field("ascii-cols", "Width").stacked().child(
                     slider("ascii-cols-slider")
                         .range(20., 200.)
                         .step(4.)
-                        .value(s.ascii_cols as f32)
+                        .value(s.recipe.ascii_cols as f32)
                         .width(px(220.))
                         .format(|v| format!("{v:.0} ch").into())
-                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.ascii_cols = *v as u32, window, cx))),
+                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.ascii_cols = *v as u32, window, cx))),
                 )),
         };
 
@@ -479,7 +782,7 @@ impl Darkroom {
                             .option("Dither")
                             .option("ASCII")
                             .selected(if mode == Mode::Ascii { 1 } else { 0 })
-                            .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.mode = if *i == 1 { Mode::Ascii } else { Mode::Dither }, window, cx))),
+                            .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.mode = if *i == 1 { Mode::Ascii } else { Mode::Dither }, window, cx))),
                     )
                     .child(process)
                     .child(rule(Some("tone"), window, cx))
@@ -487,23 +790,39 @@ impl Darkroom {
                         slider("brightness-slider")
                             .range(-1., 1.)
                             .step(0.05)
-                            .value(s.brightness)
+                            .value(s.recipe.brightness)
                             .width(px(220.))
                             .format(|v| format!("{:+.0}", v * 100.).into())
-                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.brightness = *v, window, cx))),
+                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.brightness = *v, window, cx))),
                     ))
                     .child(field("contrast", "Contrast").stacked().child(
                         slider("contrast-slider")
                             .range(0.25, 3.)
                             .step(0.05)
-                            .value(s.contrast)
+                            .value(s.recipe.contrast)
                             .width(px(220.))
                             .format(|v| format!("{v:.2}x").into())
-                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.contrast = *v, window, cx))),
+                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.contrast = *v, window, cx))),
                     ))
-                    .child(switch("invert").label("Invert").checked(s.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.invert = *on, window, cx))))
+                    .child(field("gamma", "Gamma").stacked().child(
+                        slider("gamma-slider")
+                            .range(0.2, 3.)
+                            .step(0.05)
+                            .value(s.recipe.gamma)
+                            .width(px(220.))
+                            .format(|v| format!("{v:.2}").into())
+                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.gamma = *v, window, cx))),
+                    ))
+                    .child(switch("invert").label("Invert").checked(s.recipe.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.invert = *on, window, cx))))
                     .child(rule(Some("palette"), window, cx))
-                    .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("The art takes the scheme's colours: its paper, and its text or accent as ink."))
+                    .when(mode == Mode::Dither, |el| el.child(self.palette_picker(cx)))
+                    .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(
+                        if mode == Mode::Dither && self.settings.recipe.palette != palettes::SCHEME {
+                            "The scheme dresses the window; the preset colours the art."
+                        } else {
+                            "The art takes the scheme's colours: its paper, and its text or accent as ink."
+                        },
+                    ))
                     .child(field("scheme", "Scheme").stacked().child(
                         select("scheme-select")
                             .options(SCHEMES.iter().map(|sc| sc.name))
@@ -520,11 +839,14 @@ impl Darkroom {
                         segmented("ink-seg")
                             .option("Text")
                             .option("Accent")
-                            .selected(if s.accent_ink { 1 } else { 0 })
-                            .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.accent_ink = *i == 1, window, cx))),
+                            .selected(if s.recipe.accent_ink { 1 } else { 0 })
+                            .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.accent_ink = *i == 1, window, cx))),
                     ))
                     .child(rule(Some("export"), window, cx))
-                    .child(exports),
+                    .child(exports)
+                    .child(Button::new("save-recipe").label("Save recipe").icon(Icon::File).secondary().full_width().shortcut("Ctrl+S").on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.save_recipe(cx)),
+                    )),
             ),
         )
     }
@@ -534,9 +856,9 @@ impl Render for Darkroom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (w, h) = (self.photo.print.w, self.photo.print.h);
-        let size_meta = match self.settings.mode {
-            Mode::Dither => format!("{} · {}×{} px", self.photo.name, self.settings.cols, studio::rows_for(&self.photo.print, self.settings.cols)),
-            Mode::Ascii => format!("{} · {} ch", self.photo.name, self.settings.ascii_cols),
+        let size_meta = match self.settings.recipe.mode {
+            Mode::Dither => format!("{} · {}×{} px", self.photo.name, self.settings.recipe.cols, studio::rows_for(&self.photo.print, self.settings.recipe.cols)),
+            Mode::Ascii => format!("{} · {} ch", self.photo.name, self.settings.recipe.ascii_cols),
         };
         let preview = self.preview(window, cx);
         let drop_hint = hsla(p.raised);
@@ -565,7 +887,6 @@ impl Render for Darkroom {
 
         let open = Button::new("open").label("Open").icon(Icon::Folder).ghost().small().shortcut("Ctrl+O").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open(cx)));
         let sidebar = self.sidebar(window, cx);
-        let pattern = PATTERNS.iter().find(|x| x.0 == self.settings.pattern).map(|x| x.2).unwrap_or("");
 
         window_frame().child(power_on_in(
             "power",
@@ -578,19 +899,21 @@ impl Render for Darkroom {
                 .body(text::BASE)
                 .on_action(cx.listener(|this, _: &TogglePalette, window, cx| this.palette.update(cx, |p, cx| p.toggle(window, cx))))
                 .on_action(cx.listener(|this, _: &Open, _, cx| this.open(cx)))
+                .on_action(cx.listener(|this, _: &OpenRecipe, _, cx| this.open_recipe(cx)))
+                .on_action(cx.listener(|this, _: &SaveRecipe, _, cx| this.save_recipe(cx)))
                 .on_action(cx.listener(|this, _: &ExportPng, window, cx| this.export_png(window, cx)))
                 .on_action(cx.listener(|this, _: &ExportText, _, cx| this.export_text(cx)))
                 .on_action(cx.listener(|this, _: &CopyText, _, cx| this.copy_text(cx)))
-                .on_action(cx.listener(|this, _: &Invert, window, cx| this.change(|s| s.invert = !s.invert, window, cx)))
+                .on_action(cx.listener(|this, _: &Invert, window, cx| this.change(|s| s.recipe.invert = !s.recipe.invert, window, cx)))
                 .child(self.palette.clone())
                 .child(self.toaster.clone())
                 .child(title_bar("Darkroom").child(open))
                 .child(div().flex().flex_row().flex_1().min_h_0().gap(space::ROW).p(space::ROW).child(print).child(sidebar))
                 .child(
                     status_bar()
-                        .left(match self.settings.mode {
-                            Mode::Dither => format!("DITHER · {}", pattern.to_uppercase()),
-                            Mode::Ascii => format!("ASCII · {}", self.settings.charset.name().to_uppercase()),
+                        .left(match self.settings.recipe.mode {
+                            Mode::Dither => format!("DITHER · {} · {}", self.settings.recipe.algo.name().to_uppercase(), self.palette_name().to_uppercase()),
+                            Mode::Ascii => format!("ASCII · {}", self.settings.recipe.charset.name().to_uppercase()),
                         })
                         .left(format!("SOURCE {w}×{h}"))
                         .right(theme::scheme(cx).name.to_uppercase())
@@ -600,7 +923,7 @@ impl Render for Darkroom {
     }
 }
 
-gpui::actions!(darkroom, [Open, ExportPng, ExportText, CopyText, Invert]);
+gpui::actions!(darkroom, [Open, OpenRecipe, SaveRecipe, ExportPng, ExportText, CopyText, Invert]);
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
@@ -608,6 +931,8 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-p", TogglePalette, None),
             KeyBinding::new("ctrl-o", Open, None),
+            KeyBinding::new("ctrl-shift-o", OpenRecipe, None),
+            KeyBinding::new("ctrl-s", SaveRecipe, None),
             KeyBinding::new("ctrl-e", ExportPng, None),
             KeyBinding::new("ctrl-shift-e", ExportText, None),
             KeyBinding::new("ctrl-shift-c", CopyText, None),

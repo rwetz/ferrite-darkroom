@@ -1,0 +1,10 @@
+# A Darkroom recipe: dark ink on paper with Atkinson's crisp, high-contrast
+# grain. Uses the scheme's colours, so pick a light appearance (Paper) for
+# ink on white, or Cyanotype for blue.
+mode = "dither"
+algorithm = "atkinson"
+palette = "scheme"
+ink = "text"
+cols = 280
+scale = 3
+contrast = 1.30

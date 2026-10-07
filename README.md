@@ -6,7 +6,7 @@
 
 <p align="center">
   A <a href="https://github.com/rwetz/ferrite-design">Ferrite</a> dither studio:
-  turn a photo into pixel art or ASCII with Ferrite's own patterns, and export it.
+  turn a photo into pixel art or ASCII, in twenty algorithms and any palette, and export it.
 </p>
 
 <p align="center">
@@ -17,12 +17,13 @@
 
 ![Darkroom developing the sample print with Atkinson dither in amber](docs/main.png)
 
-Darkroom turns photos into Ferrite-style art. Drop an image on the window
-and develop it with the same dither masks ferrite-design draws its textures
-with (ordered Bayer, blue noise and Atkinson error diffusion) or as ASCII
-with its glyph-fitted character sets. The art takes the colours of whichever
-Ferrite scheme you pick, so amber on iron, phosphor green or cyanotype blue
-are a click apart. Export a PNG or a text file. It's how you make splash art
+Darkroom turns photos into dithered pixel art. Drop an image on the window
+and develop it with any of twenty algorithms, from Floyd–Steinberg and
+Atkinson to Bayer matrices, blue noise and a halftone dot, or as ASCII with
+ferrite-design's glyph-fitted character sets. The art takes the colours of
+whichever Ferrite scheme you pick (amber on iron, phosphor green, cyanotype
+blue) or a preset palette: Game Boy, Commodore 64, ZX Spectrum, CMYK and
+more. Export a PNG or a text file. It's how you make splash art
 and icons for every other Ferrite app.
 
 It's a native desktop app built with [GPUI](https://gpui.rs) and
@@ -34,22 +35,44 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 - **Bring a photo.** Drop it on the print, open one with
   <kbd>Ctrl</kbd>+<kbd>O</kbd>, or pass a path: `ferrite-darkroom photo.jpg`.
   PNG, JPEG, GIF, BMP and WebP. A built-in sample print is there to start.
-- **Dither.** Bayer, blue noise or Atkinson, at 32 to 480 pixels wide. The
-  preview draws whole device pixels per art pixel, so it's exactly the export.
+- **Dither.** Twenty algorithms, at 32 to 480 pixels wide:
+  - *Error diffusion:* Floyd–Steinberg, Atkinson, Jarvis–Judice–Ninke,
+    Stucki, Burkes, Sierra, Sierra two-row, Sierra Lite, False
+    Floyd–Steinberg, Shiau–Fan and Shiau–Fan 2, with a serpentine switch.
+  - *Ordered:* Bayer 2×2, 4×4, 8×8 and 16×16, blue noise, interleaved
+    gradient noise, an 8×8 halftone dot, random, and plain threshold.
+  - *Strength* from 0 (flat posterise) to 200% (crunchy), and a
+    *threshold* that moves where ink starts.
+  The preview draws whole device pixels per art pixel, so it's exactly the
+  export.
 - **ASCII.** All thirteen of ferrite-design's character sets, from classic
   `.:-=+*#%@` to box drawing and the "best character" set, fitted by shape
   (edges) or by tone (brightness), 20 to 200 characters wide.
-- **Tone.** Brightness, contrast and invert.
-- **Palette.** The art's paper is the scheme's background and its ink is the
-  scheme's text or accent colour. Light appearance gives dark ink on light
-  paper.
-- **Export.** A PNG at 1×, 2×, 4× or 8× pixel size
+- **Tone.** Brightness, contrast, gamma and invert.
+- **Palette.** *Scheme* inks the art in the scheme's text or accent colour
+  on its background (light appearance gives dark ink on light paper). Or
+  pick a preset: Black & white, RGB, CMYK, 3-bit, Game Boy, Teletext,
+  Apple II, Commodore 64, ZX Spectrum, 6-bit RGB, 2-bit grey, Vaporwave
+  or Hacker. Colours are matched in Oklab (as the eye sees) or RGB, and a
+  palette without a true black or white still gets the photo's whole tonal
+  range. Two-colour palettes dither by lightness, so any ink on any paper
+  keeps every tone.
+- **Your own palettes.** Import one from [Lospec](https://lospec.com/palette-list)
+  or anywhere else: `.hex`, GIMP `.gpl`, JASC `.pal`, paint.net `.txt`, or a
+  palette image (its distinct colours). Or copy hex colours from anywhere and
+  *Paste hex*. Dropping a palette file on the print imports it too.
+- **Recipes.** Everything about how a print develops (algorithm, palette,
+  tone, sizes) saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
+  Open one (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>, or drop it on the
+  print) to develop any photo the same way. Four come in `recipes/`:
+  Game Boy, newsprint halftone, a seven-colour sunset, and an engraving.
+- **Export.** A PNG in the palette's exact colours at 1×, 2×, 4× or 8× pixel size
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), the ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the
   clipboard (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>).
 - **Ferrite throughout.** Ten color schemes, a command palette
-  (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with every pattern and
-  character set in it, and a CRT switch-off when you close the window.
+  (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with every algorithm,
+  palette and character set in it, and a CRT switch-off when you close the window.
 
 ## Install
 
@@ -81,8 +104,8 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Configuration
 
-Darkroom remembers the look and the last process you used, as plain
-`key = value` lines:
+Darkroom remembers the look and the last recipe you used, as plain
+`key = value` lines (a recipe file uses the same keys, in TOML):
 
 | OS | Settings |
 |---|---|
@@ -94,13 +117,24 @@ Darkroom remembers the look and the last process you used, as plain
 scheme = ferrite      # ferrite mono graphite slate concrete harbor cyanotype phosphor verdigris bruise
 appearance = dark     # dark | light | system: the paper
 mode = dither         # dither | ascii
-pattern = atkinson    # bayer | blue-noise | atkinson
+algorithm = atkinson  # floyd-steinberg atkinson jarvis-judice-ninke stucki burkes sierra sierra-two-row
+                      # sierra-lite false-floyd-steinberg shiau-fan shiau-fan-2 bayer-2 bayer bayer-8
+                      # bayer-16 blue-noise gradient-noise halftone random threshold
+palette = scheme      # scheme bw rgb cmyk 3-bit gameboy teletext apple-ii c64 zx-spectrum 6-bit
+                      # 2-bit-grey vaporwave hacker custom
+colors = 0f380f 306230 8bac0f 9bbc0f   # palette = custom: its colours
+strength = 1.00       # 0 to 2
+bias = 0.00           # -1 to 1: the threshold
+serpentine = true     # error diffusion alternates direction per row
+match = oklab         # oklab | rgb
+seed = 1              # for algorithm = random
 cols = 160            # dither width in pixels
 scale = 4             # PNG pixel size
 brightness = 0.00     # -1 to 1
 contrast = 1.00       # 0.25 to 3
+gamma = 1.00          # 0.2 to 5
 invert = false
-ink = accent          # accent | text
+ink = accent          # accent | text: the Scheme palette's ink
 charset = best-character
 fit = shape           # shape | tone
 ascii_cols = 80
@@ -130,13 +164,20 @@ discover installed binaries.
 ## Development
 
 ```bash
-cargo test                    # resampling, tone, every pattern, PNG export, ASCII, settings
+cargo test                    # every algorithm and palette, colour, tone, PNG export, ASCII, settings
 cargo clippy --all-targets
 ```
 
-- `src/studio.rs`: the whole process: loading, the working print,
-  adjustments, dither masks, PNG encoding and ASCII. Pure and unit-tested;
-  the preview and the exports both run it.
+- `src/engine.rs`: the dither engine: every algorithm, Oklab colour
+  matching, palette mapping. Pure and unit-tested.
+- `src/palettes.rs`: the preset palettes and palette-file import.
+- `src/recipe.rs`: the recipe, read and written as settings lines or TOML.
+- `recipes/`: example recipes; tests check each one loads.
+- `src/studio.rs`: the process around it: loading, the working print,
+  adjustments, PNG and preview pixels, ASCII. Pure and unit-tested; the
+  preview and the exports both run it.
+- `docs/ROADMAP.md`: where Darkroom is going (GIFs, masks, layers, an
+  ASCII engine).
 - `src/settings.rs`: the settings file.
 - `src/main.rs`: the view. It follows ferrite-design's
   [AGENTS.md](https://github.com/rwetz/ferrite-design/blob/main/AGENTS.md).
