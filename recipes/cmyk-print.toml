@@ -1,0 +1,10 @@
+# A Darkroom recipe: four-colour process printing. The photo is separated
+# into cyan, magenta, yellow and black, each screened with round dots at its
+# own angle, and the dots overprint into the eight process colours.
+mode = "dither"
+algorithm = "cmyk-halftone"
+palette = "3-bit"
+strength = 0.60
+cols = 320
+scale = 3
+contrast = 1.10

@@ -202,8 +202,25 @@ Progress is marked inline: ✅ done, everything else still to do.
    angles, Riemersma, dot diffusion, Yliluoma, Knoll, Ostromoukhov,
    stippling, hatching, custom tiles, palette extraction; video and webcam
    via ffmpeg.
-7. **1.0** when the reference images can each be reproduced from a
-   bundled recipe in under a minute.
+7. **1.0** ✅ when the reference images can each be reproduced from a
+   bundled recipe in under a minute. The cut-out (`Cut-out`), the figure on
+   a lattice (`Lattice`) and the palette row (the presets) are each one
+   click from any photo, with tests that develop a figure through the first
+   two and check the result.
+
+## After 1.0
+
+Carried over, each with the reason it waited:
+
+- **ONNX subject segmentation** (0.5): needs onnxruntime and a model
+  download; the border mask and painting cover it until then.
+- **Ostromoukhov** (0.7): needs its published coefficient table, checked
+  against the paper.
+- **Webcam** (0.7) and **animated WebP export** (0.4): platform capture
+  code, and a libwebp dependency.
+- **Sextants** (0.6): wait for a common font that draws them.
+- **Dragging the compare split on the print** (0.3), and **more than two
+  layers** (0.5).
 
 ## What moves into ferrite-design
 

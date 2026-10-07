@@ -4,11 +4,28 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] - 2026-10-07
 
-The 0.7 milestone in [the roadmap](docs/ROADMAP.md): the long tail.
+Darkroom grows from a three-pattern dither toy into a dither and text-art
+studio: twenty-nine algorithms, any palette, masks and layers, shapes,
+animation and video, braille and block art, recipes, batches and a command
+line. The reference looks (a subject cut out in one ink, a solid figure on a
+lattice of dots, the retro palette row) each come from a bundled recipe in
+one click. The milestones that got here were merged but not released on
+their own; their notes follow.
 
 ### Added
+
+- The bundled recipes are built into the app: a Recipes row at the top of
+  the sidebar, and a `Recipe:` command for each. Two new ones: CMYK print
+  and Braille (nine in all).
+- Tests that develop a figure on a backdrop through the Cut-out and Lattice
+  recipes and check the result: clean paper with one ink, and a regular dot
+  lattice around a solid figure.
+
+### 0.7: the long tail
+
+#### Added
 
 - Nine algorithms (twenty-nine in all): Riemersma (error diffusion along a
   Hilbert curve), Knuth's dot diffusion, Knoll and Yliluoma pattern
@@ -20,11 +37,9 @@ The 0.7 milestone in [the roadmap](docs/ROADMAP.md): the long tail.
 - Video in (MP4, MOV, WebM, MKV, AVI) and MP4 out, through ffmpeg when it's
   installed; `.mp4` on the command line and in batches.
 
-## 0.6 (merged, not yet released)
+### 0.6: the text-art engine
 
-The text-art engine.
-
-### Added
+#### Added
 
 - Glyph sets beyond characters: braille (2×4 dots a cell), half blocks,
   quadrants, each dithered at sub-cell resolution with any algorithm; and
@@ -39,11 +54,9 @@ The text-art engine.
   face can't misalign the grid.
 - The command line writes `.ans`, `.html` and `.svg`.
 
-## 0.5 (merged, not yet released)
+### 0.5: masks and layers
 
-Masks and layers.
-
-### Added
+#### Added
 
 - Masks: brightness, colour (click the photo to pick), border (automatic
   cut-out from a plain backdrop) and painted, with feather and invert.
@@ -56,11 +69,9 @@ Masks and layers.
   command line.
 - Two recipes for the reference looks: `cutout.toml` and `lattice.toml`.
 
-## 0.4 (merged, not yet released)
+### 0.4: animation, batch and the command line
 
-Animation, batch and the command line.
-
-### Added
+#### Added
 
 - Animated GIF, APNG and WebP in: decoded a frame at a time, shrunk as they
   arrive, played in the print at their own timing.
@@ -74,11 +85,9 @@ Animation, batch and the command line.
 - The command line: `ferrite-darkroom IN -o OUT [--recipe R] [--scheme K]
   [--light|--dark]` and `--batch DIR`, with no window.
 
-## 0.3 (merged, not yet released)
+### 0.3: render and compare
 
-Render and compare.
-
-### Added
+#### Added
 
 - Pixels as shapes: square, circle, diamond or plus, with a gutter, size by
   tone, a choice of paper colour, transparent paper (PNG alpha), and a dot
@@ -89,17 +98,14 @@ Render and compare.
 - Undo and redo for every recipe change (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y).
 - A fifth example recipe, `recipes/dots.toml`.
 
-### Fixed
+#### Fixed
 
 - A recipe or settings file saved with a UTF-8 byte-order mark (Notepad,
   PowerShell) lost its first line.
 
-## 0.2 (merged, not yet released)
+### 0.2: algorithms, palettes and recipes
 
-The 0.2 milestone in [the roadmap](docs/ROADMAP.md): algorithms, palettes
-and recipes.
-
-### Added
+#### Added
 
 - Recipes: save how a print develops as a TOML file (Ctrl+S) and open it
   again (Ctrl+Shift+O, or drop it on the print). Four example recipes ship in
@@ -124,7 +130,7 @@ and recipes.
 - `docs/ROADMAP.md`: the plan to grow Darkroom into a full dither and ASCII
   studio.
 
-### Changed
+#### Changed
 
 - `pattern` in the settings file is now `algorithm`; 0.1 files still load.
 - The settings file holds the window's look plus a recipe; inline `# comments`
@@ -155,5 +161,6 @@ The first release.
 - The shared look from Lodestone (`FERRITE_*`) when launched from it.
 - The pixel-art logo as the Windows executable, window and taskbar icon.
 
+[1.0.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.0.0
 [0.1.1]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v0.1.0
