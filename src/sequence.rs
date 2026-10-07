@@ -17,7 +17,9 @@ use std::path::Path;
 
 use image::AnimationDecoder;
 
-use crate::engine::{Params, Rgb};
+use crate::engine::Rgb;
+use crate::mask::Paint;
+use crate::recipe::Recipe;
 use crate::render::{self, Look};
 use crate::studio::{self, Adjust, Art, Print};
 
@@ -120,13 +122,15 @@ fn to_print(rgba: image::RgbaImage) -> Print {
     if w > ANIM_W { print.resize(ANIM_W, ((h as f32 / w as f32) * ANIM_W as f32).round().max(1.) as u32) } else { print }
 }
 
-/// Develop every frame. `stability` 0..1: how readily a pixel keeps last
-/// frame's colour where the photo stood still (see `engine::Hold`).
-pub fn develop_all(frames: &[Frame], cols: u32, adjust: Adjust, palette: &[Rgb], params: Params, stability: f32) -> Vec<Art> {
+/// Develop every frame by the recipe. Its `stability` (0..1) is how
+/// readily a pixel keeps last frame's colour where the photo stood still
+/// (see `engine::Hold`).
+pub fn develop_all(frames: &[Frame], recipe: &Recipe, adjust: Adjust, palette: &[Rgb], paint: Option<&Paint>) -> Vec<Art> {
+    let stability = recipe.stability;
     let mut arts: Vec<Art> = Vec::with_capacity(frames.len());
     for frame in frames {
         let prev = arts.last().filter(|_| stability > 0.).map(|a| (a, stability));
-        let art = studio::develop_held(&frame.print, cols, adjust, palette.to_vec(), params, prev);
+        let art = studio::develop_recipe(&frame.print, recipe, adjust, palette.to_vec(), paint, prev);
         arts.push(art);
     }
     arts
@@ -244,15 +248,19 @@ mod tests {
             .collect()
     }
 
-    fn params(algo: Algo) -> Params {
-        Params { algo, ..Params::default() }
+    fn params(algo: Algo) -> crate::engine::Params {
+        crate::engine::Params { algo, ..Default::default() }
+    }
+
+    fn recipe(algo: Algo, stability: f32) -> Recipe {
+        Recipe { algo, cols: 32, stability, ..Recipe::default() }
     }
 
     #[test]
     fn stability_calms_still_areas() {
         let frames = moving(6);
         let shimmer = |stability: f32| {
-            let arts = develop_all(&frames, 32, Adjust::default(), &BW, params(Algo::FloydSteinberg), stability);
+            let arts = develop_all(&frames, &recipe(Algo::FloydSteinberg, stability), Adjust::default(), &BW, None);
             // Pixels in the untouched bottom rows that change between frames.
             arts.windows(2).map(|p| (32 * 13..32 * 16).filter(|&i| p[0].index[i] != p[1].index[i]).count()).sum::<usize>()
         };
@@ -274,14 +282,14 @@ mod tests {
                 Frame { print: Print::from_rgb(32, 16, rgb), delay_ms: 80 }
             })
             .collect();
-        let arts = develop_all(&frames, 32, Adjust::default(), &BW, params(Algo::FloydSteinberg), 1.);
+        let arts = develop_all(&frames, &recipe(Algo::FloydSteinberg, 1.), Adjust::default(), &BW, None);
         assert!(arts[5].index.iter().all(|&i| i == 0), "a trail was left behind");
     }
 
     #[test]
     fn gif_round_trips_frames_and_colours() {
         let frames = moving(3);
-        let arts = develop_all(&frames, 32, Adjust::default(), &BW, params(Algo::Bayer4), 0.);
+        let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
         let bytes = gif(&arts, &delays(&frames, 1.), 2, Look::default()).unwrap();
         let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
         let out = decoder.into_frames().collect_frames().unwrap();
@@ -297,7 +305,7 @@ mod tests {
     #[test]
     fn gif_transparent_paper() {
         let frames = moving(2);
-        let arts = develop_all(&frames, 32, Adjust::default(), &BW, params(Algo::Bayer4), 0.);
+        let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
         let look = Look { transparent: true, ..Look::default() };
         let bytes = gif(&arts, &delays(&frames, 1.), 1, look).unwrap();
         let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
@@ -308,7 +316,7 @@ mod tests {
     #[test]
     fn apng_round_trips() {
         let frames = moving(3);
-        let arts = develop_all(&frames, 32, Adjust::default(), &BW, params(Algo::Atkinson), 0.5);
+        let arts = develop_all(&frames, &recipe(Algo::Atkinson, 0.5), Adjust::default(), &BW, None);
         let bytes = apng(&arts, &delays(&frames, 2.), 1, Look::default()).unwrap();
         let decoder = image::codecs::png::PngDecoder::new(std::io::Cursor::new(bytes)).unwrap();
         assert!(decoder.is_apng().unwrap());
@@ -320,7 +328,7 @@ mod tests {
     #[test]
     fn sprite_sheet_is_a_grid() {
         let frames = moving(5);
-        let arts = develop_all(&frames, 32, Adjust::default(), &BW, params(Algo::Bayer4), 0.);
+        let arts = develop_all(&frames, &recipe(Algo::Bayer4, 0.), Adjust::default(), &BW, None);
         let img = image::load_from_memory(&sprite_sheet(&arts, 1, Look::default()).unwrap()).unwrap();
         // Five frames: three to a row, two rows.
         assert_eq!((img.width(), img.height()), (96, 32));

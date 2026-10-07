@@ -1,0 +1,17 @@
+# A Darkroom recipe: the subject solid in black, the backdrop turned into a
+# lattice of light dots. Works on a subject against a plain, lighter
+# backdrop; invert the mask for a dark one.
+mode = "dither"
+algorithm = "threshold"
+palette = "bw"
+invert = true
+cols = 120
+scale = 6
+mask = "border"
+mask_tolerance = 0.08
+mask_feather = 0.00
+background = "own"
+bg_algorithm = "bayer"
+bg_shape = "square"
+bg_gutter = 0.35
+paper = "darkest"

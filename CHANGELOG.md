@@ -6,8 +6,24 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
-The 0.4 milestone in [the roadmap](docs/ROADMAP.md): animation, batch and
-the command line.
+The 0.5 milestone in [the roadmap](docs/ROADMAP.md): masks and layers.
+
+### Added
+
+- Masks: brightness, colour (click the photo to pick), border (automatic
+  cut-out from a plain backdrop) and painted, with feather and invert.
+  Soft edges are dithered with blue noise.
+- Layers: the background becomes the same dither, bare paper, or its own
+  algorithm, strength, threshold, shape, gutter, size by tone and lattice.
+- The Mask view: the photo with the background dimmed; paint on it, or
+  click to pick the key colour.
+- Painted masks export and import as greyscale PNGs; `--mask` on the
+  command line.
+- Two recipes for the reference looks: `cutout.toml` and `lattice.toml`.
+
+## 0.4 (merged, not yet released)
+
+Animation, batch and the command line.
 
 ### Added
 

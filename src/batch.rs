@@ -16,6 +16,8 @@ pub struct Job {
     pub recipe: Recipe,
     pub paper: Rgb,
     pub ink: Rgb,
+    /// A painted mask, for recipes with `mask = "painted"`.
+    pub paint: Option<crate::mask::Paint>,
 }
 
 /// A folder batch's result: the files written, and the inputs that failed
@@ -33,7 +35,7 @@ impl Job {
         let p = scheme.palette(if light { Tone::Light } else { Tone::Dark });
         let rgb = |hex: u32| [(hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff].map(|c| c as f32 / 255.);
         let ink = if recipe.accent_ink { p.accent } else { p.fg };
-        Job { recipe, paper: rgb(p.bg), ink: rgb(ink) }
+        Job { recipe, paper: rgb(p.bg), ink: rgb(ink), paint: None }
     }
 
     fn adjust(&self) -> Adjust {
@@ -53,7 +55,7 @@ impl Job {
         let colors = r.palette_colors(self.paper, self.ink);
         let bytes = match ext.as_str() {
             "gif" | "png" | "apng" => {
-                let arts = sequence::develop_all(&clip.frames, r.cols, adjust, &colors, r.params(), r.stability);
+                let arts = sequence::develop_all(&clip.frames, r, adjust, &colors, self.paint.as_ref());
                 let delays = sequence::delays(&clip.frames, r.speed);
                 match ext.as_str() {
                     "gif" => sequence::gif(&arts, &delays, r.scale, r.look())?,

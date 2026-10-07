@@ -10,6 +10,9 @@ use ferrite_design::ascii::{self, ArtStyle, Charset, Fit};
 use ferrite_design::dither::Picture;
 
 use crate::engine::{self, Params, Rgb};
+use crate::mask;
+use crate::recipe::{Background, Recipe};
+use crate::render;
 
 /// The working print is at most this wide; more detail than any export uses.
 const WORK_W: u32 = 960;
@@ -179,8 +182,10 @@ pub fn rows_for(print: &Print, cols: u32) -> u32 {
     ((cols as f32 * print.aspect()).round() as u32).max(1)
 }
 
-/// A developed print: one palette index per pixel, the palette, and the
-/// photo's Oklab lightness per pixel (for shapes sized by tone).
+/// A developed print: one palette index per pixel, the palette, the
+/// photo's Oklab lightness per pixel (for shapes sized by tone), and which
+/// layer each pixel belongs to (0 subject, 1 background; empty when there
+/// is no mask).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Art {
     pub w: u32,
@@ -188,28 +193,81 @@ pub struct Art {
     pub index: Vec<u8>,
     pub colors: Vec<Rgb>,
     pub lum: Vec<f32>,
+    pub layer: Vec<u8>,
 }
 
-/// Develop the print at `cols`×rows into `palette`.
+/// Develop the print at `cols`×rows into `palette` with bare dither
+/// settings: no mask, no frame before. Tests use it; the app develops by
+/// recipe ([`develop_recipe`]).
+#[cfg(test)]
 pub fn develop(print: &Print, cols: u32, adjust: Adjust, palette: Vec<Rgb>, params: Params) -> Art {
-    develop_held(print, cols, adjust, palette, params, None)
+    let (w, h, pixels, lum) = prepare(print, cols, adjust);
+    let index = dither_held(&pixels, &lum, w, h, &palette, params, None);
+    Art { w, h, index, colors: palette, lum, layer: Vec::new() }
 }
 
-/// [`develop`], holding the previous frame's colours where the photo
-/// stood still (`prev` and `margin`, see [`engine::Hold`]).
-pub fn develop_held(print: &Print, cols: u32, adjust: Adjust, palette: Vec<Rgb>, params: Params, prev: Option<(&Art, f32)>) -> Art {
+/// Develop by a whole recipe: the subject everywhere, and where the mask
+/// says background, the background layer (the subject again, bare paper,
+/// or its own dither). `paint` is the photo's painted mask, if any.
+pub fn develop_recipe(print: &Print, r: &Recipe, adjust: Adjust, palette: Vec<Rgb>, paint: Option<&mask::Paint>, prev: Option<(&Art, f32)>) -> Art {
+    let (w, h, pixels, lum) = prepare(print, r.cols, adjust);
+    let subject = dither_held(&pixels, &lum, w, h, &palette, r.params(), prev);
+    if !r.masked() {
+        return Art { w, h, index: subject, colors: palette, lum, layer: Vec::new() };
+    }
+    let painted = paint.map(|p| p.resize(w, h));
+    let soft = mask::compute(&r.mask, &pixels, w, h, painted.as_deref());
+    let chosen = mask::select(&soft, w);
+    let background = match r.background {
+        Background::Same => subject.clone(),
+        Background::Paper => vec![render::paper_index(&palette, r.paper) as u8; subject.len()],
+        Background::Own => dither_held(&pixels, &lum, w, h, &palette, r.bg_params(), prev),
+    };
+    let index = chosen.iter().zip(subject.iter().zip(&background)).map(|(&s, (&a, &b))| if s { a } else { b }).collect();
+    let layer = chosen.iter().map(|&s| if s { 0 } else { 1 }).collect();
+    Art { w, h, index, colors: palette, lum, layer }
+}
+
+/// The mask view: the adjusted photo at art size with the background dimmed,
+/// BGRA at `cell` pixels per art pixel.
+pub fn mask_bgra(print: &Print, r: &Recipe, adjust: Adjust, paint: Option<&mask::Paint>, cell: u32) -> (u32, u32, Vec<u8>) {
+    let (w, h, pixels, _) = prepare(print, r.cols, adjust);
+    let painted = paint.map(|p| p.resize(w, h));
+    let soft = if r.mask.kind == mask::Kind::None { vec![1.; pixels.len()] } else { mask::compute(&r.mask, &pixels, w, h, painted.as_deref()) };
+    let cell = cell.max(1);
+    let (ow, oh) = (w * cell, h * cell);
+    let mut out = Vec::with_capacity((ow * oh * 4) as usize);
+    for y in 0..oh {
+        for x in 0..ow {
+            let at = ((y / cell) * w + x / cell) as usize;
+            // Background: dimmed to a quarter and greyed, so the subject stands out.
+            let keep = 0.25 + 0.75 * soft[at];
+            let c = pixels[at];
+            let grey = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            let [r, g, b] = c.map(|v| ((v * soft[at] + grey * (1. - soft[at])) * keep * 255.).round().clamp(0., 255.) as u8);
+            out.extend_from_slice(&[b, g, r, 255]);
+        }
+    }
+    (ow, oh, out)
+}
+
+/// The print at `cols` wide, adjusted, and its Oklab lightness.
+fn prepare(print: &Print, cols: u32, adjust: Adjust) -> (u32, u32, Vec<Rgb>, Vec<f32>) {
     let small = print.resize(cols, rows_for(print, cols));
     let pixels: Vec<Rgb> = small.rgb.iter().map(|&c| adjust.color(c)).collect();
     let lum: Vec<f32> = pixels.iter().map(|&c| engine::oklab(c)[0]).collect();
-    let index = match prev {
+    (small.w, small.h, pixels, lum)
+}
+
+fn dither_held(pixels: &[Rgb], lum: &[f32], w: u32, h: u32, palette: &[Rgb], params: Params, prev: Option<(&Art, f32)>) -> Vec<u8> {
+    match prev {
         Some((prev, margin)) if prev.index.len() == pixels.len() => {
             let still: Vec<bool> = lum.iter().zip(&prev.lum).map(|(a, b)| (a - b).abs() < STILL).collect();
             let hold = engine::Hold { prev: &prev.index, still: &still, margin };
-            engine::dither_held(&pixels, small.w, small.h, &palette, params, Some(&hold))
+            engine::dither_held(pixels, w, h, palette, params, Some(&hold))
         }
-        _ => engine::dither(&pixels, small.w, small.h, &palette, params),
-    };
-    Art { w: small.w, h: small.h, index, colors: palette, lum }
+        _ => engine::dither(pixels, w, h, palette, params),
+    }
 }
 
 /// A pixel whose lightness moved less than this between frames stood still.
@@ -301,6 +359,27 @@ mod tests {
         assert!(img.pixels().all(|p| lut.contains(&p.0)));
         // A 4×4 block is one art pixel.
         assert_eq!(img.get_pixel(0, 0), img.get_pixel(3, 3));
+    }
+
+    #[test]
+    fn a_mask_splits_subject_and_background() {
+        use crate::mask::{Kind, Spec};
+        // A dark disc on white: border mask, background knocked out to paper.
+        let rgb = (0..40 * 40).map(|i| if ((i % 40) as f32 - 19.5).powi(2) + ((i / 40) as f32 - 19.5).powi(2) < 144. { [0.3; 3] } else { [1.; 3] }).collect();
+        let print = Print::from_rgb(40, 40, rgb);
+        let r = Recipe { cols: 40, algo: Algo::Bayer4, mask: Spec { kind: Kind::Border, feather: 0., ..Spec::default() }, background: Background::Paper, ..Recipe::default() };
+        let art = develop_recipe(&print, &r, Adjust::default(), vec![PAPER, INK], None, None);
+        assert_eq!(art.layer.len(), 1600);
+        assert_eq!((art.layer[0], art.layer[20 * 40 + 20]), (1, 0));
+        // The white backdrop would be all ink; as paper it's bare.
+        assert!(art.index.iter().zip(&art.layer).filter(|(_, l)| **l == 1).all(|(i, _)| *i == 0));
+        // Unmasked, there are no layers and the backdrop is inked.
+        let plain = develop_recipe(&print, &Recipe { mask: Spec::default(), ..r.clone() }, Adjust::default(), vec![PAPER, INK], None, None);
+        assert!(plain.layer.is_empty() && plain.index[0] == 1);
+        // A painted mask with nothing painted leaves only background.
+        let blank = crate::mask::Paint::blank(40, 40);
+        let painted = develop_recipe(&print, &Recipe { mask: Spec { kind: Kind::Paint, ..r.mask }, ..r }, Adjust::default(), vec![PAPER, INK], Some(&blank), None);
+        assert!(painted.layer.iter().all(|l| *l == 1));
     }
 
     #[test]

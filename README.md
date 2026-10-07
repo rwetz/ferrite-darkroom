@@ -72,6 +72,14 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   and a lattice of dots over the bare paper. It's how you get halftone dot
   grids and LED-board looks. Shapes show once a pixel is 3 px or more: in
   the preview, and in 4× and 8× PNGs.
+- **Masks and layers.** A mask splits the print into a subject and a
+  background: by brightness, by a colour you click on, *Border* (whatever
+  floods in from the image's edge, which cuts a subject off a plain
+  backdrop by itself), or painted with a brush in the *Mask* view. Feather
+  it for a dithered edge, invert it. The background then becomes the same
+  dither, bare paper (a cut-out, transparent if you like), or its own
+  algorithm, strength and cells. A painted mask exports and imports as a
+  greyscale PNG.
 - **Compare and contact sheet.** *Compare* puts the photo left of a split
   and the art right of it. *Contact sheet* shows the print through all
   twenty algorithms, or every palette, side by side; click one to use it.
@@ -85,9 +93,9 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 - **Recipes.** Everything about how a print develops (algorithm, palette,
   tone, sizes) saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
   Open one (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>, or drop it on the
-  print) to develop any photo the same way. Five come in `recipes/`:
-  Game Boy, newsprint halftone, a seven-colour sunset, an engraving, and
-  a dot lattice.
+  print) to develop any photo the same way. Seven come in `recipes/`:
+  Game Boy, newsprint halftone, a seven-colour sunset, an engraving, a dot
+  lattice, a cut-out in cobalt ink, and a solid subject on a lattice.
 - **Export.** A PNG in the palette's exact colours at 1×, 2×, 4× or 8× pixel size
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), the ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the
@@ -102,7 +110,7 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   ferrite-darkroom --batch ./photos -o ./prints --recipe recipes/newsprint.toml
   ```
 
-  The output's extension picks the format: `.png` (an APNG for an
+  A painted mask goes along with `--mask mask.png`. The output's extension picks the format: `.png` (an APNG for an
   animation), `.gif`, or `.txt` for ASCII. Without `--recipe` it uses the
   app's last recipe; `--help` lists the rest.
 - **Ferrite throughout.** Ten color schemes, a command palette
@@ -173,6 +181,21 @@ modulate = false      # size by tone
 paper = first         # first | darkest | lightest: the palette colour shapes sit on
 transparent = false   # leave the paper transparent in PNGs
 lattice = 0.00        # 0 to 1: dots over the bare paper
+mask = none           # none | brightness | colour | border | painted
+mask_low = 0.50       # brightness: the subject's lightness range
+mask_high = 1.00
+mask_colour = ffffff  # colour: the key colour
+mask_tolerance = 0.15 # colour, border: how close counts as a match
+mask_feather = 0.20   # 0 to 1: a soft, dithered edge
+mask_invert = false
+background = paper    # same | paper | own: where the mask isn't
+bg_algorithm = bayer  # background = own: its algorithm, strength, threshold
+bg_strength = 1.00
+bg_bias = 0.00
+bg_shape = square     # its cells; bg_lattice also dots a paper background
+bg_gutter = 0.00
+bg_modulate = false
+bg_lattice = 0.00
 brightness = 0.00     # -1 to 1
 contrast = 1.00       # 0.25 to 3
 gamma = 1.00          # 0.2 to 5
@@ -218,6 +241,8 @@ cargo clippy --all-targets
 - `src/sequence.rs`: animations: decoding frames, developing a whole
   clip with temporal stability, and GIF / APNG / sprite-sheet encoding.
 - `src/batch.rs` and `src/cli.rs`: developing files without a window.
+- `src/mask.rs`: masks (brightness, colour, border flood, painted) and
+  their dithered edges.
 - `src/render.rs`: how art pixels are drawn (shapes, gutter, paper,
   lattice) for the preview and PNGs, and the compare view's "before".
 - `recipes/`: example recipes; tests check each one loads.
