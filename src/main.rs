@@ -57,7 +57,14 @@ use studio::{Adjust, Art, Print};
 
 const APPEARANCES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
 const SCALES: [u32; 4] = [1, 2, 4, 8];
-const SIDEBAR: f32 = 360.;
+/// The right panel, and the tone rail on the left.
+const PANEL: f32 = 350.;
+const RAIL: f32 = 220.;
+/// Slider widths in the panel and the rail.
+const PANEL_SLIDER: f32 = 230.;
+const RAIL_SLIDER: f32 = 120.;
+/// ASCII contact-sheet thumbnails: characters across.
+const THUMB_CHARS: u32 = 56;
 /// Contact-sheet thumbnails: art width, and the narrowest a tile gets.
 const THUMB_COLS: u32 = 96;
 const TILE_MIN: f32 = 180.;
@@ -126,6 +133,62 @@ impl Zoom {
 enum SheetKind {
     Algorithms,
     Palettes,
+    /// ASCII: every character set, every font, every kind of glyph.
+    Charsets,
+    Fonts,
+    Glyphs,
+}
+
+impl SheetKind {
+    fn for_mode(mode: Mode) -> &'static [SheetKind] {
+        match mode {
+            Mode::Dither => &[SheetKind::Algorithms, SheetKind::Palettes],
+            Mode::Ascii => &[SheetKind::Charsets, SheetKind::Fonts, SheetKind::Glyphs],
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            SheetKind::Algorithms => "Algorithms",
+            SheetKind::Palettes => "Palettes",
+            SheetKind::Charsets => "Characters",
+            SheetKind::Fonts => "Fonts",
+            SheetKind::Glyphs => "Glyphs",
+        }
+    }
+}
+
+/// The right panel's tabs.
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Process,
+    Cells,
+    Mask,
+    Export,
+}
+
+impl Tab {
+    const ALL: [Tab; 4] = [Tab::Process, Tab::Cells, Tab::Mask, Tab::Export];
+
+    fn name(self) -> &'static str {
+        match self {
+            Tab::Process => "Process",
+            Tab::Cells => "Cells",
+            Tab::Mask => "Mask",
+            Tab::Export => "Export",
+        }
+    }
+}
+
+/// What a Reset button puts back.
+#[derive(Clone, Copy, PartialEq)]
+enum Section {
+    Tone,
+    Palette,
+    Process,
+    Cells,
+    Mask,
+    Export,
 }
 
 /// GPU textures the view draws, keyed by what they show. Every frame marks
@@ -256,6 +319,9 @@ impl Photo {
     fn reframe(&mut self, frame: export::Frame) -> [f32; 4] {
         let first = &self.source.frames[0].print;
         let crop = frame.crop(first.w, first.h);
+        if crop == self.crop {
+            return crop;
+        }
         let old = std::mem::replace(&mut self.crop, crop);
         self.clip = if crop == [0., 0., 1., 1.] { self.source.clone() } else { Arc::new(self.source.framed(frame)) };
         old
@@ -306,9 +372,15 @@ struct Developed {
 
 /// A contact-sheet tile: its label, its art, and whether it's the current one.
 struct Tile {
-    label: &'static str,
-    art: Rc<Art>,
+    label: String,
+    thumb: Thumb,
     current: bool,
+}
+
+/// What a tile shows: dithered art, or text art.
+enum Thumb {
+    Art(Rc<Art>),
+    Text(Rc<TextArt>),
 }
 
 /// Makes an export's bytes, off the main thread.
@@ -334,8 +406,10 @@ struct Darkroom {
     sheet: SheetKind,
     /// The contact sheet's tiles and the inputs they were developed from.
     tiles: Option<(u64, Rc<Vec<Tile>>)>,
-    undo: Vec<Recipe>,
-    redo: Vec<Recipe>,
+    /// Every setting as it was before each edit, and as undone.
+    undo: Vec<Settings>,
+    redo: Vec<Settings>,
+    tab: Tab,
     last_edit: Option<Instant>,
     /// An animation's frames, all developed (with stability), and the
     /// inputs they came from; developed in the background.
@@ -381,6 +455,7 @@ impl Darkroom {
             sheet: SheetKind::Algorithms,
             tiles: None,
             undo: Vec::new(),
+            tab: Tab::Process,
             redo: Vec::new(),
             last_edit: None,
             reel: None,
@@ -435,7 +510,7 @@ impl Darkroom {
     }
 
     fn change(&mut self, f: impl FnOnce(&mut Settings), window: &mut Window, cx: &mut Context<Self>) {
-        let before = self.settings.recipe.clone();
+        let before = self.settings.clone();
         f(&mut self.settings);
         self.record(before);
         self.apply_look(window, cx);
@@ -445,7 +520,7 @@ impl Darkroom {
     /// Change only the recipe: no look to reapply, so no window needed
     /// (async results land here).
     fn set_recipe(&mut self, f: impl FnOnce(&mut Recipe), cx: &mut Context<Self>) {
-        let before = self.settings.recipe.clone();
+        let before = self.settings.clone();
         f(&mut self.settings.recipe);
         self.record(before);
         self.save(cx);
@@ -453,10 +528,10 @@ impl Darkroom {
 
     // ── Undo ─────────────────────────────────────────────────────────────
 
-    /// Remember the recipe as it was before an edit. A burst of edits (a
-    /// slider drag) keeps only its first "before", so it undoes in one go.
-    fn record(&mut self, before: Recipe) {
-        if before == self.settings.recipe {
+    /// Remember every setting as it was before an edit. A burst of edits
+    /// (a slider drag) keeps only its first "before", so it undoes in one go.
+    fn record(&mut self, before: Settings) {
+        if before == self.settings {
             return;
         }
         let now = Instant::now();
@@ -471,20 +546,71 @@ impl Darkroom {
         self.last_edit = Some(now);
     }
 
-    fn undo(&mut self, cx: &mut Context<Self>) {
-        if let Some(r) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.settings.recipe, r));
-            self.last_edit = None;
-            self.save(cx);
+    /// Back to the settings before the last edit, whatever it was: the
+    /// recipe, the export, the frame, the theme.
+    fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(s) = self.undo.pop() {
+            self.redo.push(std::mem::replace(&mut self.settings, s));
+            self.restored(window, cx);
         }
     }
 
-    fn redo(&mut self, cx: &mut Context<Self>) {
-        if let Some(r) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.settings.recipe, r));
-            self.last_edit = None;
-            self.save(cx);
+    fn redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(s) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.settings, s));
+            self.restored(window, cx);
         }
+    }
+
+    /// After undo or redo: the look, the frame and the file follow.
+    fn restored(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.last_edit = None;
+        self.apply_look(window, cx);
+        self.sync_frame(cx);
+        self.save(cx);
+    }
+
+    /// Put a section's settings back to how a fresh recipe has them.
+    fn reset(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        let d = Recipe::default();
+        let fresh = Settings::default();
+        self.change(
+            |s| {
+                let r = &mut s.recipe;
+                match section {
+                    Section::Tone => {
+                        (r.auto_levels, r.black, r.white) = (d.auto_levels, d.black, d.white);
+                        (r.brightness, r.contrast, r.gamma, r.invert) = (d.brightness, d.contrast, d.gamma, d.invert);
+                    }
+                    Section::Palette => (r.palette, r.space, r.accent_ink) = (d.palette, d.space, d.accent_ink),
+                    Section::Process => match r.mode {
+                        Mode::Dither => {
+                            (r.algo, r.strength, r.bias, r.serpentine, r.seed) = (d.algo, d.strength, d.bias, d.serpentine, d.seed);
+                        }
+                        Mode::Ascii => {
+                            (r.glyphs, r.charset, r.fit, r.diffuse, r.font, r.dot) = (d.glyphs, d.charset, d.fit, d.diffuse, d.font, d.dot);
+                        }
+                    },
+                    Section::Cells => match r.mode {
+                        Mode::Dither => {
+                            (r.shape, r.gutter, r.modulate, r.paper, r.transparent, r.lattice) = (d.shape, d.gutter, d.modulate, d.paper, d.transparent, d.lattice);
+                        }
+                        Mode::Ascii => r.ascii_tint = d.ascii_tint,
+                    },
+                    Section::Mask => {
+                        (r.mask, r.background) = (d.mask, d.background);
+                        (r.bg_algo, r.bg_strength, r.bg_bias, r.bg_cells) = (d.bg_algo, d.bg_strength, d.bg_bias, d.bg_cells);
+                    }
+                    Section::Export => {
+                        r.scale = d.scale;
+                        (s.format, s.size, s.frame) = (fresh.format, fresh.size, fresh.frame);
+                    }
+                }
+            },
+            window,
+            cx,
+        );
+        self.sync_frame(cx);
     }
 
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
@@ -515,8 +641,8 @@ impl Darkroom {
             command("Batch develop a folder…").group("File").icon(Icon::Folder).on_run(run(|this, _, cx| this.batch(cx))),
             command("Paste palette").group("Recipe").icon(Icon::Copy).on_run(run(|this, _, cx| this.paste_palette(cx))),
             command("New random seed").group("Develop").icon(Icon::Refresh).on_run(run(|this, _, cx| this.reseed(cx))),
-            command("Undo").group("Edit").shortcut("Ctrl+Z").on_run(run(|this, _, cx| this.undo(cx))),
-            command("Redo").group("Edit").shortcut("Ctrl+Shift+Z").on_run(run(|this, _, cx| this.redo(cx))),
+            command("Undo").group("Edit").shortcut("Ctrl+Z").on_run(run(|this, window, cx| this.undo(window, cx))),
+            command("Redo").group("Edit").shortcut("Ctrl+Shift+Z").on_run(run(|this, window, cx| this.redo(window, cx))),
             command("View: mask").group("View").on_run(run(|this, _, cx| this.set_view(View::Mask, cx))),
             command("Import mask…").group("Mask").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_mask(cx))),
             command("Export mask…").group("Mask").icon(Icon::File).on_run(run(|this, _, cx| this.export_mask(cx))),
@@ -869,7 +995,12 @@ impl Darkroom {
     /// moves with the crop.
     fn set_frame(&mut self, frame: export::Frame, window: &mut Window, cx: &mut Context<Self>) {
         self.change(|s| s.frame = frame, window, cx);
-        let old = self.photo.reframe(frame);
+        self.sync_frame(cx);
+    }
+
+    /// Crop the photo to the frame in the settings, if it isn't already.
+    fn sync_frame(&mut self, cx: &mut Context<Self>) {
+        let old = self.photo.reframe(self.settings.frame);
         if old == self.photo.crop {
             return;
         }
@@ -1146,6 +1277,7 @@ impl Darkroom {
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_3()
             .child(
@@ -1170,6 +1302,26 @@ impl Darkroom {
                     })),
             )
             .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(format!("{} ms", self.frame_delay())))
+            .child(
+                slider("speed-slider")
+                    .range(0.25, 4.)
+                    .step(0.25)
+                    .value(self.settings.recipe.speed)
+                    .width(px(140.))
+                    .format(|v| format!("speed {v:.2}x").into())
+                    .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.speed = *v, cx))),
+            )
+            .when(self.settings.recipe.mode == Mode::Dither, |el| {
+                el.child(
+                    slider("stability-slider")
+                        .range(0., 1.)
+                        .step(0.05)
+                        .value(self.settings.recipe.stability)
+                        .width(px(140.))
+                        .format(|v| if v <= 0. { "stability off".into() } else { format!("stability {:.0}%", v * 100.).into() })
+                        .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.stability = *v, cx))),
+                )
+            })
             .when(self.reel_job.is_some(), |el| el.child(spinner("reel-spinner")).child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("developing every frame")))
     }
 
@@ -1286,7 +1438,7 @@ impl Darkroom {
             choices.push(("Custom", r.colors.clone(), custom));
         }
         let bits = |c: &[Rgb]| c.iter().map(|c| c.map(f32::to_bits)).collect::<Vec<_>>();
-        let inputs = key_of((self.sheet, self.roll, self.paint_rev, Self::adjust_key(a), r.flat_lines(), bits(&current), choices.iter().map(|c| bits(&c.1)).collect::<Vec<_>>()));
+        let inputs = key_of((self.sheet_kind(), self.roll, self.paint_rev, Self::adjust_key(a), r.flat_lines(), bits(&current), choices.iter().map(|c| bits(&c.1)).collect::<Vec<_>>()));
         if let Some((k, tiles)) = &self.tiles
             && *k == inputs
         {
@@ -1294,19 +1446,29 @@ impl Darkroom {
         }
         let print = self.photo.print();
         let paint = self.paint.as_ref();
-        let small = Recipe { cols: THUMB_COLS, ..r.clone() };
-        let tiles: Vec<Tile> = match self.sheet {
+        let small = Recipe { cols: THUMB_COLS, ascii_cols: THUMB_CHARS, ..r.clone() };
+        let art = |recipe: &Recipe, colors: Vec<Rgb>| Thumb::Art(Rc::new(studio::develop_recipe(print, recipe, a, colors, paint, None)));
+        let text = |recipe: &Recipe| Thumb::Text(Rc::new(textart::make(print, recipe, a, &current, paper, ink, paint)));
+        let tiles: Vec<Tile> = match self.sheet_kind() {
             SheetKind::Algorithms => Algo::ALL
                 .iter()
-                .map(|&algo| Tile {
-                    label: algo.name(),
-                    art: Rc::new(studio::develop_recipe(print, &Recipe { algo, ..small.clone() }, a, current.clone(), paint, None)),
-                    current: algo == r.algo,
+                .map(|&algo| Tile { label: algo.name().into(), thumb: art(&Recipe { algo, ..small.clone() }, current.clone()), current: algo == r.algo })
+                .collect(),
+            SheetKind::Palettes => choices.into_iter().map(|(label, colors, current)| Tile { label: label.into(), thumb: art(&small, colors), current }).collect(),
+            SheetKind::Charsets => Set::all()
+                .into_iter()
+                .map(|set| {
+                    let recipe = Recipe { glyphs: Glyphs::Characters, charset: set, fit: set.default_fit(), diffuse: set.default_diffuse(), ..small.clone() };
+                    Tile { label: set.name(), thumb: text(&recipe), current: r.glyphs == Glyphs::Characters && set == r.charset }
                 })
                 .collect(),
-            SheetKind::Palettes => choices
-                .into_iter()
-                .map(|(label, colors, current)| Tile { label, art: Rc::new(studio::develop_recipe(print, &small, a, colors, paint, None)), current })
+            SheetKind::Fonts => Font::ALL
+                .iter()
+                .map(|&font| Tile { label: font.name().into(), thumb: text(&Recipe { glyphs: Glyphs::Characters, font, ..small.clone() }), current: r.glyphs == Glyphs::Characters && font == r.font })
+                .collect(),
+            SheetKind::Glyphs => Glyphs::ALL
+                .iter()
+                .map(|&glyphs| Tile { label: glyphs.name().into(), thumb: text(&Recipe { glyphs, ..small.clone() }), current: glyphs == r.glyphs })
                 .collect(),
         };
         let tiles = Rc::new(tiles);
@@ -1461,7 +1623,7 @@ impl Darkroom {
         let p = palette(cx);
         // The room the print has: the window less the sidebar, chrome and padding.
         let view = window.viewport_size();
-        let (room_w, room_h) = (f32::from(view.width) - SIDEBAR - 72., f32::from(view.height) - 200.);
+        let (room_w, room_h) = (f32::from(view.width) - PANEL - RAIL - 96., f32::from(view.height) - 250.);
         let sf = window.scale_factor();
         let room_h = if self.photo.frames() > 1 && self.view != View::Sheet { room_h - 44. } else { room_h };
         let zoom = self.zoom;
@@ -1492,7 +1654,7 @@ impl Darkroom {
             return pan(dw, dh, easel.into_any_element());
         }
         match self.settings.recipe.mode {
-            Mode::Dither if self.view == View::Sheet => self.sheet_view(room_w, room_h, window, cx).into_any_element(),
+            _ if self.view == View::Sheet => self.sheet_view(room_w, room_h, window, cx).into_any_element(),
             Mode::Dither => {
                 let (art, dev) = self.current_art(cx);
                 let (w, h) = (art.w, art.h);
@@ -1533,12 +1695,19 @@ impl Darkroom {
         }
     }
 
-    /// A grid of thumbnails, one per algorithm or palette. Click one to use it.
+    /// The contact sheet's kind, one that fits the mode.
+    fn sheet_kind(&self) -> SheetKind {
+        let kinds = SheetKind::for_mode(self.settings.recipe.mode);
+        if kinds.contains(&self.sheet) { self.sheet } else { kinds[0] }
+    }
+
+    /// A grid of thumbnails: algorithms or palettes, or for ASCII the
+    /// character sets, fonts or glyph kinds. Click one to use it.
     fn sheet_view(&mut self, room_w: f32, room_h: f32, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let sf = window.scale_factor();
         let tiles = self.tiles(cx);
-        let kind = self.sheet;
+        let kind = self.sheet_kind();
         // As many columns as fit, each tile stretched to share the width.
         let per_row = ((room_w + TILE_GAP) / (TILE_MIN + TILE_FRAME + TILE_GAP)).floor().max(1.);
         let tile_w = (room_w - TILE_GAP * (per_row - 1.)) / per_row - TILE_FRAME - 1.;
@@ -1546,9 +1715,28 @@ impl Darkroom {
             .iter()
             .enumerate()
             .map(|(i, tile)| {
-                let art = tile.art.clone();
-                let cell = ((tile_w * sf) / art.w as f32).floor().max(1.) as u32;
-                let image = self.tex.get(key_of(("tile", self.tiles.as_ref().map(|t| t.0), i, cell)), || render::bgra(&art, cell, render::Look::default()));
+                let key = key_of(("tile", self.tiles.as_ref().map(|t| t.0), i, (tile_w * sf) as u32));
+                let (image, dw, dh) = match &tile.thumb {
+                    Thumb::Art(art) => {
+                        let cell = ((tile_w * sf) / art.w as f32).floor().max(1.) as u32;
+                        let art = art.clone();
+                        (self.tex.get(key, || render::bgra(&art, cell, render::Look::default())), art.w * cell, art.h * cell)
+                    }
+                    Thumb::Text(text) => {
+                        let (nw, nh) = text.native();
+                        let dw = (tile_w * sf).floor().max(1.) as u32;
+                        let dh = ((dw as f32 * nh as f32 / nw.max(1) as f32).round() as u32).max(1);
+                        let text = text.clone();
+                        let image = self.tex.get(key, || {
+                            let (w, h, mut px) = text.raster_sized(dw, dh);
+                            for p in px.as_chunks_mut::<4>().0 {
+                                p.swap(0, 2);
+                            }
+                            (w, h, px)
+                        });
+                        (image, dw, dh)
+                    }
+                };
                 let border = if tile.current { p.accent } else { p.line };
                 div()
                     .id(("tile", i))
@@ -1562,8 +1750,8 @@ impl Darkroom {
                     .border_color(hsla(border))
                     .hover(|style| style.bg(hsla(p.raised)))
                     .cursor_pointer()
-                    .child(texture(image, art.w * cell, art.h * cell, sf))
-                    .child(div().body(text::SM).text_color(hsla(if tile.current { p.accent } else { p.fg_dim })).child(tile.label))
+                    .child(texture(image, dw, dh, sf))
+                    .child(div().body(text::SM).text_color(hsla(if tile.current { p.accent } else { p.fg_dim })).child(tile.label.clone()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.set_recipe(
                             |r| match kind {
@@ -1572,6 +1760,12 @@ impl Darkroom {
                                     Some(preset) => r.palette = preset.key.into(),
                                     None => r.palette = palettes::CUSTOM.into(),
                                 },
+                                SheetKind::Charsets => {
+                                    let set = Set::all()[i];
+                                    (r.glyphs, r.charset, r.fit, r.diffuse) = (Glyphs::Characters, set, set.default_fit(), set.default_diffuse());
+                                }
+                                SheetKind::Fonts => (r.glyphs, r.font) = (Glyphs::Characters, Font::ALL[i]),
+                                SheetKind::Glyphs => r.glyphs = Glyphs::ALL[i],
                             },
                             cx,
                         );
@@ -1587,24 +1781,56 @@ impl Darkroom {
             .child(div().flex().flex_row().flex_wrap().gap(px(TILE_GAP)).children(items))
     }
 
-    /// The row over the print: which view, and that view's controls.
+    /// The row over the print: the mode and its width (used in both, more
+    /// than anything else), which view, the zoom, and that view's controls.
     fn view_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let dither = self.settings.recipe.mode == Mode::Dither;
-        let views: &'static [View] = if dither { &[View::Print, View::Compare, View::Sheet, View::Mask] } else { &[View::Print, View::Compare, View::Mask] };
+        let r = &self.settings.recipe;
+        let mode = r.mode;
+        let views = [View::Print, View::Compare, View::Sheet, View::Mask];
         let name = |v: &View| match v {
             View::Print => "Print",
             View::Compare => "Compare",
             View::Sheet => "Sheet",
             View::Mask => "Mask",
         };
-        let mut bar = div().flex().flex_row().items_center().gap_4().child(
-            views
-                .iter()
-                .fold(segmented("view-seg"), |seg, v| seg.option(name(v)))
-                .selected(views.iter().position(|v| *v == self.view).unwrap_or(0))
-                .on_select(cx.listener(move |this, i: &usize, _, cx| this.set_view(views[*i], cx))),
-        );
-        if !dither || self.view != View::Sheet {
+        let width = match mode {
+            Mode::Dither => slider("cols-slider")
+                .range(32., 480.)
+                .step(8.)
+                .value(r.cols as f32)
+                .width(px(180.))
+                .format(|v| format!("{v:.0} px wide").into())
+                .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.cols = *v as u32, window, cx))),
+            Mode::Ascii => slider("ascii-cols-slider")
+                .range(16., 240.)
+                .step(4.)
+                .value(r.ascii_cols as f32)
+                .width(px(180.))
+                .format(|v| format!("{v:.0} ch wide").into())
+                .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.ascii_cols = *v as u32, window, cx))),
+        };
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_4()
+            .child(
+                segmented("mode-seg")
+                    .option("Dither")
+                    .option("ASCII")
+                    .selected(if mode == Mode::Ascii { 1 } else { 0 })
+                    .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.mode = if *i == 1 { Mode::Ascii } else { Mode::Dither }, window, cx))),
+            )
+            .child(width)
+            .child(
+                views
+                    .iter()
+                    .fold(segmented("view-seg"), |seg, v| seg.option(name(v)))
+                    .selected(views.iter().position(|v| *v == self.view).unwrap_or(0))
+                    .on_select(cx.listener(move |this, i: &usize, _, cx| this.set_view(views[*i], cx))),
+            );
+        if self.view != View::Sheet {
             bar = bar.child(
                 Zoom::ALL
                     .iter()
@@ -1631,14 +1857,16 @@ impl Darkroom {
                         })),
                 )
             }
-            View::Sheet if dither => {
+            View::Sheet => {
+                let kinds = SheetKind::for_mode(mode);
+                let current = self.sheet_kind();
                 bar = bar.child(
-                    segmented("sheet-seg")
-                        .option("Algorithms")
-                        .option("Palettes")
-                        .selected(if self.sheet == SheetKind::Palettes { 1 } else { 0 })
-                        .on_select(cx.listener(|this, i: &usize, _, cx| {
-                            this.sheet = if *i == 1 { SheetKind::Palettes } else { SheetKind::Algorithms };
+                    kinds
+                        .iter()
+                        .fold(segmented("sheet-seg"), |seg, k| seg.option(k.name()))
+                        .selected(kinds.iter().position(|k| *k == current).unwrap_or(0))
+                        .on_select(cx.listener(move |this, i: &usize, _, cx| {
+                            this.sheet = kinds[*i];
                             cx.notify();
                         })),
                 )
@@ -1653,7 +1881,7 @@ impl Darkroom {
                 };
                 bar = bar.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(hint))
             }
-            View::Print | View::Sheet => {}
+            View::Print => {}
         }
         bar
     }
@@ -1673,7 +1901,7 @@ impl Darkroom {
                         select("shape-select")
                             .options(Shape::ALL.iter().map(|sh| sh.name()))
                             .selected(Shape::ALL.iter().position(|sh| *sh == r.shape))
-                            .width(px(220.))
+                            .width(px(PANEL_SLIDER))
                             .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.shape = Shape::ALL[*i], cx))),
                     ),
             )
@@ -1682,7 +1910,7 @@ impl Darkroom {
                     .range(0., 0.9)
                     .step(0.05)
                     .value(r.gutter)
-                    .width(px(220.))
+                    .width(px(PANEL_SLIDER))
                     .format(|v| format!("{:.0}%", v * 100.).into())
                     .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.gutter = *v, cx))),
             ))
@@ -1712,7 +1940,7 @@ impl Darkroom {
                     .range(0., 1.)
                     .step(0.05)
                     .value(r.lattice)
-                    .width(px(220.))
+                    .width(px(PANEL_SLIDER))
                     .format(|v| if v <= 0. { "off".into() } else { format!("{:.0}%", v * 100.).into() })
                     .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.lattice = *v, cx))),
             ))
@@ -1728,7 +1956,7 @@ impl Darkroom {
                     .range(lo, hi)
                     .step(0.01)
                     .value(value)
-                    .width(px(220.))
+                    .width(px(PANEL_SLIDER))
                     .format(|v| format!("{:.0}%", v * 100.).into())
                     .on_change(cx.listener(move |this, v: &f32, _, cx| this.set_recipe(|r| set(r, *v), cx))),
             )
@@ -1738,7 +1966,7 @@ impl Darkroom {
                 select("mask-select")
                     .options(Kind::ALL.iter().map(|k| k.name()))
                     .selected(Kind::ALL.iter().position(|k| *k == kind))
-                    .width(px(220.))
+                    .width(px(PANEL_SLIDER))
                     .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.mask.kind = Kind::ALL[*i], cx))),
             ),
         );
@@ -1773,7 +2001,7 @@ impl Darkroom {
                             .range(0.005, 0.2)
                             .step(0.005)
                             .value(self.brush)
-                            .width(px(220.))
+                            .width(px(PANEL_SLIDER))
                             .format(|v| format!("{:.1}%", v * 100.).into())
                             .on_change(cx.listener(|this, v: &f32, _, cx| {
                                 this.brush = *v;
@@ -1830,7 +2058,7 @@ impl Darkroom {
                     select("bg-algo-select")
                         .options(Algo::ALL.iter().map(|a| a.name()))
                         .selected(Algo::ALL.iter().position(|a| *a == r.bg_algo))
-                        .width(px(220.))
+                        .width(px(PANEL_SLIDER))
                         .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.bg_algo = Algo::ALL[*i], cx))),
                 ))
                 .child(slider_row("bg-strength", "Background strength", 0., 2., r.bg_strength, |r, v| r.bg_strength = v, cx))
@@ -1838,7 +2066,7 @@ impl Darkroom {
                     select("bg-shape-select")
                         .options(Shape::ALL.iter().map(|sh| sh.name()))
                         .selected(Shape::ALL.iter().position(|sh| *sh == r.bg_cells.shape))
-                        .width(px(220.))
+                        .width(px(PANEL_SLIDER))
                         .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.bg_cells.shape = Shape::ALL[*i], cx))),
                 ))
                 .child(slider_row("bg-gutter", "Background gutter", 0., 0.9, r.bg_cells.gutter, |r, v| r.bg_cells.gutter = v, cx))
@@ -1853,110 +2081,6 @@ impl Darkroom {
             col = col.child(slider_row("bg-lattice", "Background lattice", 0., 1., r.bg_cells.lattice, |r, v| r.bg_cells.lattice = v, cx));
         }
         col
-    }
-
-    fn anim_controls(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let r = &self.settings.recipe;
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                field("stability", "Stability")
-                    .hint("Holds pixels that didn't change since the last frame, so diffusion doesn't shimmer")
-                    .stacked()
-                    .child(
-                        slider("stability-slider")
-                            .range(0., 1.)
-                            .step(0.05)
-                            .value(r.stability)
-                            .width(px(220.))
-                            .format(|v| if v <= 0. { "off".into() } else { format!("{:.0}%", v * 100.).into() })
-                            .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.stability = *v, cx))),
-                    ),
-            )
-            .child(field("speed", "Speed").stacked().child(
-                slider("speed-slider")
-                    .range(0.25, 4.)
-                    .step(0.25)
-                    .value(r.speed)
-                    .width(px(220.))
-                    .format(|v| format!("{v:.2}x").into())
-                    .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.speed = *v, cx))),
-            ))
-    }
-
-    /// The preset row, the colours it gives, and how they're matched.
-    fn palette_picker(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let s = &self.settings;
-        let chips = palettes::PRESETS.iter().enumerate().map(|(i, preset)| {
-            let key = preset.key;
-            Button::new(("palette", i))
-                .label(preset.name)
-                .small()
-                .secondary()
-                .selected(s.recipe.palette == key)
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.change(|s| s.recipe.palette = key.into(), window, cx)))
-        });
-        // The custom palette gets a chip once there is one to go back to.
-        let custom = (!s.recipe.colors.is_empty()).then(|| {
-            Button::new("palette-custom")
-                .label(format!("Custom ({})", s.recipe.colors.len()))
-                .small()
-                .secondary()
-                .selected(self.custom().is_some())
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_recipe(|r| r.palette = palettes::CUSTOM.into(), cx)))
-        });
-        // The swatches are the art's own colours, data rather than chrome.
-        let swatches = self.palette_colors(cx).into_iter().map(|[r, g, b]| div().w(px(14.)).h(px(14.)).bg(Rgba { r, g, b, a: 1. }));
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().flex().flex_row().flex_wrap().gap_1().children(chips).children(custom))
-            .child(div().flex().flex_row().flex_wrap().children(swatches))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(Button::new("import-palette").label("Import…").icon(Icon::Folder).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.import_palette(cx))))
-                    .child(Button::new("paste-palette").label("Paste hex").icon(Icon::Copy).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.paste_palette(cx))))
-                    .child(Button::new("extract-palette").label(format!("From photo ({})", self.extract_n)).icon(Icon::Refresh).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.extract_palette(cx)))),
-            )
-            .child(
-                slider("extract-slider")
-                    .range(2., 32.)
-                    .step(1.)
-                    .value(self.extract_n as f32)
-                    .width(px(220.))
-                    .format(|v| format!("{v:.0} colours from the photo").into())
-                    .on_change(cx.listener(|this, v: &f32, _, cx| {
-                        this.extract_n = *v as usize;
-                        cx.notify();
-                    })),
-            )
-            .child(div().body(text::SM).text_color(hsla(palette(cx).fg_dim)).child("Lospec .hex, .gpl, .pal, .txt or a palette image; or copy hex colours and paste."))
-            .child(
-                field("match", "Match colours")
-                    .hint("Oklab compares as the eye does; RGB is cruder and punchier; Linear averages real light")
-                    .stacked()
-                    .child(
-                        segmented("match-seg")
-                            .option("Oklab")
-                            .option("RGB")
-                            .option("Linear")
-                            .selected(match s.recipe.space {
-                                Space::Oklab => 0,
-                                Space::Rgb => 1,
-                                Space::Linear => 2,
-                            })
-                            .on_select(cx.listener(|this, i: &usize, _, cx| {
-                                let space = [Space::Oklab, Space::Rgb, Space::Linear][*i];
-                                this.set_recipe(|r| r.space = space, cx)
-                            })),
-                    ),
-            )
     }
 
     /// Advice on the photo's size for the width chosen.
@@ -2006,7 +2130,7 @@ impl Darkroom {
                     select("format-select")
                         .options(export::Format::ALL.iter().map(|f| f.name()))
                         .selected(export::Format::ALL.iter().position(|f| *f == s.format))
-                        .width(px(220.))
+                        .width(px(PANEL_SLIDER))
                         .on_change(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.format = export::Format::ALL[*i], window, cx))),
                 ),
             )
@@ -2028,7 +2152,7 @@ impl Darkroom {
                             select("frame-select")
                                 .options(std::iter::once("Photo's shape").chain(aspects.iter().map(|(n, _)| *n)))
                                 .selected(Some(frame.aspect.and_then(|a| aspects.iter().position(|(_, x)| *x == a)).map(|i| i + 1).unwrap_or(0)))
-                                .width(px(220.))
+                                .width(px(PANEL_SLIDER))
                                 .on_change(cx.listener(move |this, i: &usize, window, cx| {
                                     let aspect = i.checked_sub(1).map(|i| export::ASPECTS[i].1);
                                     let fill = this.settings.frame.fill || this.settings.frame.aspect.is_none();
@@ -2051,7 +2175,7 @@ impl Darkroom {
                     select("size-select")
                         .options(options)
                         .selected(Some(selected))
-                        .width(px(220.))
+                        .width(px(PANEL_SLIDER))
                         .on_change(cx.listener(|this, i: &usize, window, cx| {
                             let size = match *i {
                                 0 => export::Size::Scale,
@@ -2101,13 +2225,224 @@ impl Darkroom {
             )
     }
 
-    fn sidebar(&self, export_dims: (u32, u32), window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// A handler for menus and the palette: runs `f` on the view.
+    fn act(cx: &mut Context<Self>, f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static) -> impl Fn(&mut Window, &mut App) + 'static {
+        let weak = cx.weak_entity();
+        move |window, cx| {
+            let _ = weak.update(cx, |this, cx| f(this, window, cx));
+        }
+    }
+
+    /// A section's first lines: a Reset that puts it back, and what it is.
+    fn section_head(id: &'static str, hint: gpui::SharedString, section: Section, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div().flex().flex_row().justify_end().child(
+                    Button::new(id).label("Reset").icon(Icon::Refresh).ghost().small().tooltip("Back to the defaults").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.reset(section, window, cx))),
+                ),
+            )
+            .when(!hint.is_empty(), |el| el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(hint)))
+    }
+
+    /// The tone rail: levels and tone, the same in both modes, always in view.
+    fn tone_rail(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let r = &self.settings.recipe;
+        let row = |id: &'static str, label: &'static str, (lo, hi, step): (f32, f32, f32), value: f32, fmt: fn(f32) -> String, set: fn(&mut Recipe, f32), cx: &mut Context<Self>| {
+            field(id, label).stacked().child(
+                slider(id)
+                    .range(lo, hi)
+                    .step(step)
+                    .value(value)
+                    .width(px(RAIL_SLIDER))
+                    .format(move |v| fmt(v).into())
+                    .on_change(cx.listener(move |this, v: &f32, window, cx| this.change(|s| set(&mut s.recipe, *v), window, cx))),
+            )
+        };
+        panel("Tone").w(px(RAIL)).flex_none().min_h_0().child(
+            scroll_area("tone-scroll").flex_1().min_h_0().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_2()
+                    .child(Self::section_head("reset-tone", "".into(), Section::Tone, cx))
+                    .child(
+                        switch("auto-levels")
+                            .label("Auto levels")
+                            .checked(r.auto_levels)
+                            .on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.auto_levels = *on, window, cx))),
+                    )
+                    .child(row("black", "Black point", (0., 0.6, 0.01), r.black, |v| format!("{:.0}%", v * 100.), |r, v| r.black = v, cx))
+                    .child(row("white", "White point", (0.4, 1., 0.01), r.white, |v| format!("{:.0}%", v * 100.), |r, v| r.white = v, cx))
+                    .child(row("brightness", "Brightness", (-1., 1., 0.05), r.brightness, |v| format!("{:+.0}", v * 100.), |r, v| r.brightness = v, cx))
+                    .child(row("contrast", "Contrast", (0.25, 3., 0.05), r.contrast, |v| format!("{v:.2}x"), |r, v| r.contrast = v, cx))
+                    .child(row("gamma", "Gamma", (0.2, 3., 0.05), r.gamma, |v| format!("{v:.2}"), |r, v| r.gamma = v, cx))
+                    .child(switch("invert").label("Invert").checked(r.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.invert = *on, window, cx)))),
+            ),
+        )
+    }
+
+    /// The palette strip under the print: the preset, its colours, and
+    /// everything else about colour in one menu.
+    fn palette_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let s = &self.settings;
+        let custom = !s.recipe.colors.is_empty();
+        let mut names: Vec<String> = palettes::PRESETS.iter().map(|pr| pr.name.to_string()).collect();
+        if custom {
+            names.push(format!("Custom ({})", s.recipe.colors.len()));
+        }
+        let selected = if self.custom().is_some() { names.len() - 1 } else { palettes::PRESETS.iter().position(|pr| pr.key == s.recipe.palette).unwrap_or(0) };
+        let swatches = self.palette_colors(cx).into_iter().take(32).map(|[r, g, b]| div().w(px(14.)).h(px(14.)).bg(Rgba { r, g, b, a: 1. }));
+        let space = s.recipe.space;
+        let accent = s.recipe.accent_ink;
+        let mut extract = submenu("From the photo").icon(Icon::Refresh);
+        for n in [2usize, 4, 8, 16, 32] {
+            extract = extract.item(menu_item(format!("{n} colours")).checked(self.extract_n == n).on_select(Self::act(cx, move |this, _, cx| {
+                this.extract_n = n;
+                this.extract_palette(cx);
+            })));
+        }
+        let mut matching = submenu("Match colours");
+        for (name, sp) in [("Oklab (as the eye sees)", Space::Oklab), ("RGB (punchier)", Space::Rgb), ("Linear (real light)", Space::Linear)] {
+            matching = matching.item(menu_item(name).checked(space == sp).on_select(Self::act(cx, move |this, _, cx| this.set_recipe(|r| r.space = sp, cx))));
+        }
+        let menu = dropdown_menu("palette-menu")
+            .trigger(Button::new("palette-more").icon(Icon::Menu).ghost().small().tooltip("Import, extract, match"))
+            .item(menu_item("Import palette…").icon(Icon::Folder).on_select(Self::act(cx, |this, _, cx| this.import_palette(cx))))
+            .item(menu_item("Paste hex colours").icon(Icon::Copy).on_select(Self::act(cx, |this, _, cx| this.paste_palette(cx))))
+            .submenu(extract)
+            .separator()
+            .submenu(matching)
+            .submenu(
+                submenu("Scheme ink")
+                    .item(menu_item("Text colour").checked(!accent).on_select(Self::act(cx, |this, window, cx| this.change(|s| s.recipe.accent_ink = false, window, cx))))
+                    .item(menu_item("Accent colour").checked(accent).on_select(Self::act(cx, |this, window, cx| this.change(|s| s.recipe.accent_ink = true, window, cx)))),
+            )
+            .separator()
+            .item(menu_item("Reset the palette").icon(Icon::Refresh).on_select(Self::act(cx, |this, window, cx| this.reset(Section::Palette, window, cx))));
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(div().display(Scale::X1, window).text_color(hsla(p.fg_dim)).child("PALETTE"))
+            .child(
+                select("palette-select")
+                    .options(names)
+                    .selected(Some(selected))
+                    .width(px(170.))
+                    .on_change(cx.listener(move |this, i: &usize, window, cx| match palettes::PRESETS.get(*i) {
+                        Some(preset) => this.change(|s| s.recipe.palette = preset.key.into(), window, cx),
+                        None => this.change(|s| s.recipe.palette = palettes::CUSTOM.into(), window, cx),
+                    })),
+            )
+            .child(div().flex().flex_row().flex_wrap().max_h(px(28.)).overflow_hidden().children(swatches))
+            .child(menu)
+    }
+
+    /// The one export button: what it makes, and a menu of the rest.
+    fn export_button(&self, (w, h): (u32, u32), cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let s = &self.settings;
+        let animated = self.photo.frames() > 1;
+        let ascii = s.recipe.mode == Mode::Ascii;
+        let what = if animated { "GIF".to_string() } else { s.format.name().to_string() };
+        let frame = match s.frame.aspect {
+            Some((fw, fh)) => format!(" · {fw}:{fh} {}", if s.frame.fill { "fill" } else { "fit" }),
+            None => String::new(),
+        };
+        let detail = format!("{w}×{h} px{frame} · Ctrl+E");
+        let primary = Button::new("export-main").label(format!("Export {what}")).icon(Icon::File).primary().full_width().loading(self.exporting).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            if this.photo.frames() > 1 { this.export_anim(AnimOut::Gif, cx) } else { this.export_still(cx) }
+        }));
+        let mut menu = dropdown_menu("export-menu").trigger(Button::new("export-more").icon(Icon::ChevronDown).secondary().tooltip("More ways out"));
+        if animated {
+            menu = menu
+                .label("Animation")
+                .item(menu_item("GIF").on_select(Self::act(cx, |this, _, cx| this.export_anim(AnimOut::Gif, cx))))
+                .item(menu_item("APNG").on_select(Self::act(cx, |this, _, cx| this.export_anim(AnimOut::Apng, cx))));
+            if self.ffmpeg {
+                menu = menu.item(menu_item("MP4").on_select(Self::act(cx, |this, _, cx| this.export_anim(AnimOut::Mp4, cx))));
+            }
+            menu = if ascii {
+                menu.item(menu_item("ASCII film (HTML)").on_select(Self::act(cx, |this, _, cx| this.export_film(cx))))
+            } else {
+                menu.item(menu_item("Sprite sheet").on_select(Self::act(cx, |this, _, cx| this.export_anim(AnimOut::Sheet, cx))))
+            };
+            menu = menu.separator().item(menu_item(format!("This frame as {}", s.format.name())).on_select(Self::act(cx, |this, _, cx| this.export_still(cx))));
+        } else {
+            menu = menu.label("Picture");
+            for format in export::Format::ALL {
+                menu = menu.item(menu_item(format.name()).checked(s.format == format).on_select(Self::act(cx, move |this, window, cx| {
+                    this.change(|s| s.format = format, window, cx);
+                    this.export_still(cx);
+                })));
+            }
+        }
+        if ascii {
+            menu = menu
+                .separator()
+                .label("Text")
+                .item(menu_item("Text").shortcut("Ctrl+Shift+E").on_select(Self::act(cx, |this, _, cx| this.export_text(cx))))
+                .item(menu_item("ANSI").on_select(Self::act(cx, |this, _, cx| this.export_textart("ans", cx))))
+                .item(menu_item("HTML").on_select(Self::act(cx, |this, _, cx| this.export_textart("html", cx))))
+                .item(menu_item("Copy text").icon(Icon::Copy).shortcut("Ctrl+Shift+C").on_select(Self::act(cx, |this, _, cx| this.copy_text(cx))));
+        }
+        let p = palette(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().flex().flex_row().gap_1().child(div().flex_1().min_w_0().child(primary)).child(menu.align(Align::End)))
+            .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(detail))
+    }
+
+    /// The title bar's menus: recipes, and the theme.
+    fn recipes_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mut menu = dropdown_menu("recipes-menu").trigger(Button::new("recipes-trigger").label("Recipes").icon(Icon::ChevronDown).ghost().small()).label("Looks");
+        for (i, (name, _)) in recipe::BUNDLED.iter().enumerate() {
+            menu = menu.item(menu_item(*name).on_select(Self::act(cx, move |this, _, cx| this.use_bundled(i, cx))));
+        }
+        menu.separator()
+            .item(menu_item("Open recipe…").icon(Icon::Folder).shortcut("Ctrl+Shift+O").on_select(Self::act(cx, |this, _, cx| this.open_recipe(cx))))
+            .item(menu_item("Save recipe…").icon(Icon::File).shortcut("Ctrl+S").on_select(Self::act(cx, |this, _, cx| this.save_recipe(cx))))
+            .item(menu_item("Batch develop a folder…").icon(Icon::Folder).on_select(Self::act(cx, |this, _, cx| this.batch(cx))))
+    }
+
+    fn theme_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let s = &self.settings;
+        let mut schemes = submenu("Scheme");
+        for sc in SCHEMES.iter() {
+            let key = sc.key;
+            schemes = schemes.item(menu_item(sc.name).checked(s.scheme == key).on_select(Self::act(cx, move |this, window, cx| this.change(|s| s.scheme = key.into(), window, cx))));
+        }
+        let mut paper = submenu("Paper");
+        for (key, name) in APPEARANCES {
+            paper = paper.item(menu_item(name).checked(s.appearance == key).on_select(Self::act(cx, move |this, window, cx| this.change(|s| s.appearance = key.into(), window, cx))));
+        }
+        let fps = s.fps;
+        dropdown_menu("theme-menu")
+            .trigger(Button::new("theme-trigger").label("Theme").icon(Icon::ChevronDown).ghost().small())
+            .submenu(schemes)
+            .submenu(paper)
+            .submenu(
+                submenu("Motion")
+                    .item(menu_item("Stepped (25 fps)").checked(fps == 25).on_select(Self::act(cx, |this, window, cx| this.change(|s| s.fps = 25, window, cx))))
+                    .item(menu_item("Smooth (240 fps)").checked(fps != 25).on_select(Self::act(cx, |this, window, cx| this.change(|s| s.fps = 240, window, cx)))),
+            )
+    }
+
+    /// The right panel: the export button, then tabs for what the mode does.
+    fn sidebar(&self, export_dims: (u32, u32), cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let s = &self.settings;
         let mode = s.recipe.mode;
         let source_hint = self.source_hint();
-
-        let process = match mode {
+        let body = match mode {
             Mode::Dither => div()
                 .flex()
                 .flex_col()
@@ -2120,7 +2455,7 @@ impl Darkroom {
                             select("algo-select")
                                 .options(Algo::ALL.iter().map(|a| a.name()))
                                 .selected(Algo::ALL.iter().position(|a| *a == s.recipe.algo))
-                                .width(px(220.))
+                                .width(px(PANEL_SLIDER))
                                 .on_change(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.algo = Algo::ALL[*i], window, cx))),
                         ),
                 )
@@ -2129,7 +2464,7 @@ impl Darkroom {
                         .range(0., 2.)
                         .step(0.05)
                         .value(s.recipe.strength)
-                        .width(px(220.))
+                        .width(px(PANEL_SLIDER))
                         .format(|v| format!("{:.0}%", v * 100.).into())
                         .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.strength = *v, window, cx))),
                 ))
@@ -2142,7 +2477,7 @@ impl Darkroom {
                                 .range(-1., 1.)
                                 .step(0.05)
                                 .value(s.recipe.bias)
-                                .width(px(220.))
+                                .width(px(PANEL_SLIDER))
                                 .format(|v| format!("{:+.0}", v * 100.).into())
                                 .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.bias = *v, window, cx))),
                         ),
@@ -2176,15 +2511,8 @@ impl Darkroom {
                             .on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.serpentine = *on, window, cx))),
                     )
                 })
-                .child(field("cols", "Width").hint(source_hint.clone()).stacked().child(
-                    slider("cols-slider")
-                        .range(32., 480.)
-                        .step(8.)
-                        .value(s.recipe.cols as f32)
-                        .width(px(220.))
-                        .format(|v| format!("{v:.0} px").into())
-                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.cols = *v as u32, window, cx))),
-                )),
+
+                ,
             Mode::Ascii => div()
                 .flex()
                 .flex_col()
@@ -2194,26 +2522,18 @@ impl Darkroom {
                         select("glyphs-select")
                             .options(Glyphs::ALL.iter().map(|g| g.name()))
                             .selected(Glyphs::ALL.iter().position(|g| *g == s.recipe.glyphs))
-                            .width(px(220.))
+                            .width(px(PANEL_SLIDER))
                             .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.glyphs = Glyphs::ALL[*i], cx))),
                     ),
                 )
-                .child(
-                    field("ascii-tint", "Colour").hint(if s.recipe.glyphs == Glyphs::ColorBlocks { "Colour half blocks always use the palette" } else { "Ink, the photo's own colours, or the palette's" }).stacked().child(
-                        Tint::ALL
-                            .iter()
-                            .fold(segmented("tint-seg"), |seg, t| seg.option(t.name()))
-                            .selected(Tint::ALL.iter().position(|t| *t == s.recipe.ascii_tint).unwrap_or(0))
-                            .on_select(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.ascii_tint = Tint::ALL[*i], cx))),
-                    ),
-                )
+
                 .when(s.recipe.glyphs != Glyphs::Characters, |el| {
                     el.child(
                         field("ascii-algo", "Dither").stacked().child(
                             select("ascii-algo-select")
                                 .options(Algo::ALL.iter().map(|a| a.name()))
                                 .selected(Algo::ALL.iter().position(|a| *a == s.recipe.algo))
-                                .width(px(220.))
+                                .width(px(PANEL_SLIDER))
                                 .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.algo = Algo::ALL[*i], cx))),
                         ),
                     )
@@ -2224,7 +2544,7 @@ impl Darkroom {
                         select("charset-select")
                             .options(sets.iter().map(|c| c.name()))
                             .selected(sets.iter().position(|c| *c == s.recipe.charset))
-                            .width(px(220.))
+                            .width(px(PANEL_SLIDER))
                             .on_change(cx.listener(|this, i: &usize, window, cx| {
                                 let c = Set::all()[*i];
                                 this.change(
@@ -2255,7 +2575,7 @@ impl Darkroom {
                         select("font-select")
                             .options(Font::ALL.iter().map(|f| f.name()))
                             .selected(Font::ALL.iter().position(|f| *f == s.recipe.font))
-                            .width(px(220.))
+                            .width(px(PANEL_SLIDER))
                             .on_change(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.font = Font::ALL[*i], window, cx))),
                     ))
                 })
@@ -2265,215 +2585,69 @@ impl Darkroom {
                             .range(0.3, 1.)
                             .step(0.02)
                             .value(s.recipe.dot)
-                            .width(px(220.))
+                            .width(px(PANEL_SLIDER))
                             .format(|v| format!("{:.0}%", v * 100.).into())
                             .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.dot = *v, window, cx))),
                     ))
                 })
-                .child(field("ascii-cols", "Width").hint(source_hint.clone()).stacked().child(
-                    slider("ascii-cols-slider")
-                        .range(16., 240.)
-                        .step(4.)
-                        .value(s.recipe.ascii_cols as f32)
-                        .width(px(220.))
-                        .format(|v| format!("{v:.0} ch").into())
-                        .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.ascii_cols = *v as u32, window, cx))),
-                )),
+
+                ,
         };
 
-        let animated = self.photo.frames() > 1;
-        let exports = match mode {
-            Mode::Dither if animated => div()
+        let content = match self.tab {
+            Tab::Process => div()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .child(Button::new("export-gif").label("Export GIF").icon(Icon::File).primary().full_width().shortcut("Ctrl+E").on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Gif, cx),
-                )))
-                .child(Button::new("export-apng").label("Export APNG").icon(Icon::File).secondary().full_width().on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Apng, cx),
-                )))
-                .child(Button::new("export-sheet").label("Export sprite sheet").icon(Icon::File).secondary().full_width().on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Sheet, cx),
-                )))
-                .when(self.ffmpeg, |el| {
-                    el.child(Button::new("export-mp4").label("Export MP4").icon(Icon::File).secondary().full_width().on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Mp4, cx),
-                    )))
-                })
-                .child(Button::new("export-frame").label(format!("Export this frame as {}", s.format.name())).icon(Icon::File).ghost().full_width().loading(self.exporting).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| this.export_still(cx),
-                ))),
-            Mode::Dither => div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(Button::new("export-still").label(format!("Export {}", s.format.name())).icon(Icon::File).primary().full_width().shortcut("Ctrl+E").loading(self.exporting).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| this.export_still(cx),
-                ))),
-            Mode::Ascii => div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .when(animated, |el| {
-                    el.child(Button::new("export-tgif").label("Export GIF").icon(Icon::File).primary().full_width().shortcut("Ctrl+E").on_click(cx.listener(
-                        |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Gif, cx),
-                    )))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(Button::new("export-tapng").label("APNG").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Apng, cx))))
-                            .when(self.ffmpeg, |el| {
-                                el.child(Button::new("export-tmp4").label("MP4").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Mp4, cx))))
-                            })
-                            .child(Button::new("export-film").label("ASCII film").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_film(cx)))),
-                    )
-                })
-                .child({
-                    let still = Button::new("export-still").icon(Icon::File).full_width().loading(self.exporting).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_still(cx)));
-                    if animated {
-                        still.label(format!("Export this frame as {}", s.format.name())).ghost()
-                    } else {
-                        still.label(format!("Export {}", s.format.name())).primary().shortcut("Ctrl+E")
-                    }
-                })
-                .child(Button::new("export-text").label("Export text").icon(Icon::File).secondary().full_width().shortcut("Ctrl+Shift+E").on_click(
-                    cx.listener(|this, _: &ClickEvent, _, cx| this.export_text(cx)),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(Button::new("export-ans").label("ANSI").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("ans", cx))))
-                        .child(Button::new("export-html").label("HTML").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_textart("html", cx))))
-                        ,
-                )
-                .child(Button::new("copy-text").label("Copy").icon(Icon::Copy).secondary().full_width().shortcut("Ctrl+Shift+C").on_click(
-                    cx.listener(|this, _: &ClickEvent, _, cx| this.copy_text(cx)),
-                )),
-        };
-
-        let recipes = recipe::BUNDLED.iter().enumerate().map(|(i, (name, _))| {
-            Button::new(("recipe", i)).label(*name).small().secondary().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.use_bundled(i, cx)))
-        });
-        panel("Develop").w(px(SIDEBAR)).flex_none().min_h_0().child(
-            scroll_area("develop-scroll").flex_1().min_h_0().child(
-                div()
+                .gap_3()
+                .child(Self::section_head("reset-process", source_hint.into(), Section::Process, cx))
+                .child(body)
+                .into_any_element(),
+            Tab::Cells => match mode {
+                Mode::Dither => div().flex().flex_col().gap_3().child(Self::section_head("reset-cells", "How each pixel is drawn".into(), Section::Cells, cx)).child(self.render_controls(cx)).into_any_element(),
+                Mode::Ascii => div()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .p_2()
+                    .gap_3()
+                    .child(Self::section_head("reset-cells", "How each character is coloured".into(), Section::Cells, cx))
                     .child(
-                        field("recipes", "Recipes")
-                            .hint("A look in one click; tune it after, save your own with Ctrl+S")
-                            .stacked()
-                            .child(div().flex().flex_row().flex_wrap().gap_1().children(recipes)),
+                        field("ascii-tint", "Colour").hint(if s.recipe.glyphs == Glyphs::ColorBlocks { "Colour half blocks always use the palette" } else { "Ink, the photo's own colours, or the palette's" }).stacked().child(
+                            Tint::ALL
+                                .iter()
+                                .fold(segmented("tint-seg"), |seg, t| seg.option(t.name()))
+                                .selected(Tint::ALL.iter().position(|t| *t == s.recipe.ascii_tint).unwrap_or(0))
+                                .on_select(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.ascii_tint = Tint::ALL[*i], cx))),
+                        ),
                     )
-                    .child(
-                        segmented("mode-seg")
-                            .option("Dither")
-                            .option("ASCII")
-                            .selected(if mode == Mode::Ascii { 1 } else { 0 })
-                            .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.mode = if *i == 1 { Mode::Ascii } else { Mode::Dither }, window, cx))),
-                    )
-                    .child(process)
-                    .child(rule(Some("tone"), window, cx))
-                    .child(
-                        switch("auto-levels")
-                            .label("Auto levels")
-                            .checked(s.recipe.auto_levels)
-                            .on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.auto_levels = *on, window, cx))),
-                    )
-                    .child(field("black", "Black point").hint("Tones darker than this go to black: raise it to clear a dark background").stacked().child(
-                        slider("black-slider")
-                            .range(0., 0.6)
-                            .step(0.01)
-                            .value(s.recipe.black)
-                            .width(px(220.))
-                            .format(|v| format!("{:.0}%", v * 100.).into())
-                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.black = *v, window, cx))),
-                    ))
-                    .child(field("white", "White point").hint("Tones lighter than this go to white").stacked().child(
-                        slider("white-slider")
-                            .range(0.4, 1.)
-                            .step(0.01)
-                            .value(s.recipe.white)
-                            .width(px(220.))
-                            .format(|v| format!("{:.0}%", v * 100.).into())
-                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.white = *v, window, cx))),
-                    ))
-                    .child(field("brightness", "Brightness").stacked().child(
-                        slider("brightness-slider")
-                            .range(-1., 1.)
-                            .step(0.05)
-                            .value(s.recipe.brightness)
-                            .width(px(220.))
-                            .format(|v| format!("{:+.0}", v * 100.).into())
-                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.brightness = *v, window, cx))),
-                    ))
-                    .child(field("contrast", "Contrast").stacked().child(
-                        slider("contrast-slider")
-                            .range(0.25, 3.)
-                            .step(0.05)
-                            .value(s.recipe.contrast)
-                            .width(px(220.))
-                            .format(|v| format!("{v:.2}x").into())
-                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.contrast = *v, window, cx))),
-                    ))
-                    .child(field("gamma", "Gamma").stacked().child(
-                        slider("gamma-slider")
-                            .range(0.2, 3.)
-                            .step(0.05)
-                            .value(s.recipe.gamma)
-                            .width(px(220.))
-                            .format(|v| format!("{v:.2}").into())
-                            .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.gamma = *v, window, cx))),
-                    ))
-                    .child(switch("invert").label("Invert").checked(s.recipe.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.invert = *on, window, cx))))
-                    .when(mode == Mode::Dither, |el| el.child(rule(Some("render"), window, cx)).child(self.render_controls(cx)))
-                    .child(rule(Some("mask"), window, cx))
-                    .child(self.mask_controls(cx))
-                    .when(mode == Mode::Dither && animated, |el| el.child(rule(Some("animation"), window, cx)).child(self.anim_controls(cx)))
-                    .child(rule(Some("palette"), window, cx))
-                    .when(mode == Mode::Dither, |el| el.child(self.palette_picker(cx)))
-                    .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(
-                        if mode == Mode::Dither && self.settings.recipe.palette != palettes::SCHEME {
-                            "The scheme dresses the window; the preset colours the art."
-                        } else {
-                            "The art takes the scheme's colours: its paper, and its text or accent as ink."
-                        },
-                    ))
-                    .child(field("scheme", "Scheme").stacked().child(
-                        select("scheme-select")
-                            .options(SCHEMES.iter().map(|sc| sc.name))
-                            .selected(SCHEMES.iter().position(|sc| sc.key == s.scheme))
-                            .width(px(220.))
-                            .on_change(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.scheme = SCHEMES[*i].key.into(), window, cx))),
-                    ))
-                    .child(field("appearance", "Paper").stacked().child(
-                        APPEARANCES.iter().fold(segmented("appearance-seg"), |seg, (_, l)| seg.option(*l))
-                            .selected(APPEARANCES.iter().position(|(k, _)| *k == s.appearance).unwrap_or(0))
-                            .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.appearance = APPEARANCES[*i].0.into(), window, cx))),
-                    ))
-                    .child(field("ink", "Ink").stacked().child(
-                        segmented("ink-seg")
-                            .option("Text")
-                            .option("Accent")
-                            .selected(if s.recipe.accent_ink { 1 } else { 0 })
-                            .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.accent_ink = *i == 1, window, cx))),
-                    ))
-                    .child(rule(Some("export"), window, cx))
-                    .child(self.export_controls(export_dims, cx))
-                    .child(exports)
-                    .child(Button::new("save-recipe").label("Save recipe").icon(Icon::File).secondary().full_width().shortcut("Ctrl+S").on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.save_recipe(cx)),
-                    )),
-            ),
+                    .into_any_element(),
+            },
+            Tab::Mask => div().flex().flex_col().gap_3().child(Self::section_head("reset-mask", "Split the print into a subject and a background".into(), Section::Mask, cx)).child(self.mask_controls(cx)).into_any_element(),
+            Tab::Export => div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(Self::section_head("reset-export", "How pictures come out".into(), Section::Export, cx))
+                .child(self.export_controls(export_dims, cx))
+                .into_any_element(),
+        };
+        panel("Develop").w(px(PANEL)).flex_none().min_h_0().child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .gap_2()
+                .child(div().px_2().child(self.export_button(export_dims, cx)))
+                .child(
+                    Tab::ALL
+                        .iter()
+                        .fold(tabs("panel-tabs"), |t, tab| t.tab(tab.name()))
+                        .selected(Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0))
+                        .on_select(cx.listener(|this, i: &usize, _, cx| {
+                            this.tab = Tab::ALL[*i];
+                            cx.notify();
+                        })),
+                )
+                .child(scroll_area("develop-scroll").flex_1().min_h_0().child(div().p_2().child(content))),
         )
     }
 }
@@ -2492,6 +2666,7 @@ impl Render for Darkroom {
         let view_bar = Some(self.view_bar(cx));
         let timeline = (self.photo.frames() > 1 && self.view != View::Sheet).then(|| self.timeline(cx));
         let drop_hint = hsla(p.raised);
+        let palette_strip = self.palette_strip(window, cx);
         let print = panel("Print").meta(size_meta).flex_1().min_w_0().min_h_0().children(view_bar.map(|bar| div().px_2().pb_2().child(bar))).child(
             div()
                 .id("easel")
@@ -2514,11 +2689,17 @@ impl Render for Darkroom {
                     el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("A sample print. Drop a photo, a GIF or a video here, or open one with Ctrl+O."))
                 }),
         )
-        .children(timeline.map(|t| div().px_2().pt_2().child(t)));
+        .children(timeline.map(|t| div().px_2().pt_2().child(t)))
+        .child(div().px_2().pt_2().child(palette_strip));
 
         let open = Button::new("open").label("Open").icon(Icon::Folder).ghost().small().shortcut("Ctrl+O").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open(cx)));
+        let undo = Button::new("undo").label("Undo").ghost().small().tooltip("Undo (Ctrl+Z)").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.undo(window, cx)));
+        let redo = Button::new("redo").label("Redo").ghost().small().tooltip("Redo (Ctrl+Shift+Z)").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.redo(window, cx)));
+        let recipes = self.recipes_menu(cx);
+        let theme = self.theme_menu(cx);
         let export_dims = self.export_dims(cx);
-        let sidebar = self.sidebar(export_dims, window, cx);
+        let sidebar = self.sidebar(export_dims, cx);
+        let rail = self.tone_rail(cx);
 
         window_frame().child(power_on_in(
             "power",
@@ -2533,8 +2714,8 @@ impl Render for Darkroom {
                 .on_action(cx.listener(|this, _: &Open, _, cx| this.open(cx)))
                 .on_action(cx.listener(|this, _: &OpenRecipe, _, cx| this.open_recipe(cx)))
                 .on_action(cx.listener(|this, _: &SaveRecipe, _, cx| this.save_recipe(cx)))
-                .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
-                .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
+                .on_action(cx.listener(|this, _: &Undo, window, cx| this.undo(window, cx)))
+                .on_action(cx.listener(|this, _: &Redo, window, cx| this.redo(window, cx)))
                 .on_action(cx.listener(|this, _: &ExportPng, _, cx| {
                     if this.photo.frames() > 1 {
                         this.export_anim(AnimOut::Gif, cx)
@@ -2550,8 +2731,8 @@ impl Render for Darkroom {
                 .on_action(cx.listener(|this, _: &Invert, window, cx| this.change(|s| s.recipe.invert = !s.recipe.invert, window, cx)))
                 .child(self.palette.clone())
                 .child(self.toaster.clone())
-                .child(title_bar("Darkroom").child(open))
-                .child(div().flex().flex_row().flex_1().min_h_0().gap(space::ROW).p(space::ROW).child(print).child(sidebar))
+                .child(title_bar("Darkroom").child(open).child(recipes).child(theme).child(undo).child(redo))
+                .child(div().flex().flex_row().flex_1().min_h_0().gap(space::ROW).p(space::ROW).child(rail).child(print).child(sidebar))
                 .child(
                     status_bar()
                         .left(match self.settings.recipe.mode {

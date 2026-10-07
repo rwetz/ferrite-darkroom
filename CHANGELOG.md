@@ -4,6 +4,34 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-10-07
+
+### Changed
+
+- The window is reorganised. The one long sidebar is now:
+  - a **tone rail** on the left: levels, brightness, contrast, gamma and
+    invert, the same in both modes and always in view;
+  - over the print, the **mode** and its **width** (the most-used control
+    in both modes) beside the view and the zoom;
+  - under the print, a **palette strip**: the preset, its colours, and a
+    menu to import, paste, extract from the photo, match colours and pick
+    the scheme ink;
+  - on the right, one **Export** button showing what it makes (its menu has
+    every other output) over **Process**, **Cells**, **Mask** and
+    **Export** tabs;
+  - **Recipes** and **Theme** (scheme, paper, motion) as title-bar menus,
+    with Undo and Redo beside them.
+  Animation speed and stability moved into the timeline.
+
+### Added
+
+- **Reset** on every section (tone, palette, and each tab) puts its
+  defaults back; undoable.
+- A contact sheet in ASCII mode: every character set, every font, or every
+  kind of glyph, side by side. Click one to use it.
+- Undo and redo cover every setting, not only the recipe: the export
+  format, size and frame, and the theme.
+
 ## [1.2.2] - 2026-10-07
 
 ### Fixed
@@ -240,6 +268,7 @@ The first release.
 - The shared look from Lodestone (`FERRITE_*`) when launched from it.
 - The pixel-art logo as the Windows executable, window and taskbar icon.
 
+[1.3.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.3.0
 [1.2.2]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.2
 [1.2.1]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.1
 [1.2.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.0
