@@ -150,8 +150,11 @@ Progress is marked inline: ✅ done, everything else still to do.
    (FS, False FS, JJN, Stucki, Burkes, Sierra ×3, Atkinson, Shiau–Fan ×2),
    serpentine; ✅ Bayer 2–16, blue noise, gradient noise, halftone dot,
    random, threshold; ✅ strength, gamma; ✅ the 13 preset palettes and the
-   preset row; ✅ Oklab / RGB matching. *Still to do:* the `Recipe` refactor,
-   recipe TOML save/load, threshold bias, Lospec import. Original scope: Pipeline refactor into `Recipe`;
+   preset row; ✅ Oklab / RGB matching; ✅ the `Recipe` (src/recipe.rs) with
+   TOML save/load and four bundled recipes; ✅ threshold bias; ✅ Lospec
+   import (.hex, .gpl, .pal, .txt, palette images, pasted hex). *Moved on:*
+   linear-light dithering and palette extraction from the photo join 0.7.
+   Original scope: Pipeline refactor into `Recipe`;
    error-diffusion kernel table (FS, JJN, Stucki, Burkes, Sierra ×3,
    Atkinson, Shiau–Fan); Bayer 2–16; strength, gamma, threshold;
    multi-colour palettes with the 13 presets; Oklab matching; preset row;

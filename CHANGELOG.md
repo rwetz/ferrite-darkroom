@@ -6,9 +6,17 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
-The first part of the 0.2 milestone in [the roadmap](docs/ROADMAP.md).
+The 0.2 milestone in [the roadmap](docs/ROADMAP.md): algorithms, palettes
+and recipes.
 
 ### Added
+
+- Recipes: save how a print develops as a TOML file (Ctrl+S) and open it
+  again (Ctrl+Shift+O, or drop it on the print). Four example recipes ship in
+  `recipes/`.
+- Custom palettes: import Lospec `.hex`, GIMP `.gpl`, JASC `.pal`,
+  paint.net `.txt` or a palette image, or paste hex colours.
+- A threshold (bias) control, and a new seed for the random algorithm.
 
 - Twenty dither algorithms in Darkroom's own engine: eleven error-diffusion
   kernels (Floyd–Steinberg, Atkinson, Jarvis–Judice–Ninke, Stucki, Burkes,
@@ -29,6 +37,8 @@ The first part of the 0.2 milestone in [the roadmap](docs/ROADMAP.md).
 ### Changed
 
 - `pattern` in the settings file is now `algorithm`; 0.1 files still load.
+- The settings file holds the window's look plus a recipe; inline `# comments`
+  (as in the README's example) no longer end up in the values.
 - PNG exports are named after the algorithm and palette.
 
 ## [0.1.1] - 2026-10-07

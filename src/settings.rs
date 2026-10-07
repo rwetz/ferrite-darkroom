@@ -1,18 +1,9 @@
-//! Darkroom's settings — the look and the last process used — saved as
+//! Darkroom's settings — the look, and the recipe last used — saved as
 //! plain `key = value` lines in `<config>/ferrite/darkroom.conf`.
 
 use std::path::PathBuf;
 
-use ferrite_design::ascii::{Charset, Fit};
-
-use crate::engine::{Algo, Space};
-use crate::palettes;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Mode {
-    Dither,
-    Ascii,
-}
+use crate::recipe::{self, Recipe};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -20,97 +11,27 @@ pub struct Settings {
     /// `dark`, `light` or `system`.
     pub appearance: String,
     pub fps: u32,
-    pub mode: Mode,
-    pub algo: Algo,
-    /// A preset key from `palettes::PRESETS`.
-    pub palette: String,
-    /// 0..2: error carried, or how far the threshold map reaches.
-    pub strength: f32,
-    pub serpentine: bool,
-    /// Where colours are matched.
-    pub space: Space,
-    /// Dither width in pixels.
-    pub cols: u32,
-    /// Each pixel's size in the exported PNG.
-    pub scale: u32,
-    pub brightness: f32,
-    pub contrast: f32,
-    pub gamma: f32,
-    pub invert: bool,
-    /// Ink in the accent rather than the text colour.
-    pub accent_ink: bool,
-    pub charset: Charset,
-    pub fit: Fit,
-    /// ASCII width in characters.
-    pub ascii_cols: u32,
+    pub recipe: Recipe,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
-            scheme: "ferrite".into(),
-            appearance: "dark".into(),
-            fps: 240,
-            mode: Mode::Dither,
-            algo: Algo::Atkinson,
-            palette: palettes::SCHEME.into(),
-            strength: 1.,
-            serpentine: true,
-            space: Space::Oklab,
-            cols: 160,
-            scale: 4,
-            brightness: 0.,
-            contrast: 1.,
-            gamma: 1.,
-            invert: false,
-            accent_ink: true,
-            charset: Charset::Full,
-            fit: Fit::Shape,
-            ascii_cols: 80,
-        }
+        Self { scheme: "ferrite".into(), appearance: "dark".into(), fps: 240, recipe: Recipe::default() }
     }
-}
-
-fn charset_key(c: Charset) -> String {
-    c.name().replace(' ', "-")
 }
 
 impl Settings {
     pub fn parse(src: &str) -> Self {
         let mut s = Self::default();
-        let flag = |v: &str, default: bool| match v {
-            "true" | "on" | "yes" => true,
-            "false" | "off" | "no" => false,
-            _ => default,
-        };
-        for line in src.lines() {
-            let line = line.trim();
-            if line.starts_with('#') {
+        for (k, value) in src.lines().filter_map(recipe::parse_line) {
+            if s.recipe.apply(&k, &value) {
                 continue;
             }
-            let Some((k, v)) = line.split_once('=') else { continue };
-            let v = v.trim();
-            match k.trim() {
-                "scheme" if !v.is_empty() => s.scheme = v.into(),
-                "appearance" if matches!(v, "dark" | "light" | "system") => s.appearance = v.into(),
+            let (recipe::Value::Bare(v) | recipe::Value::Text(v)) = value else { continue };
+            match k.as_str() {
+                "scheme" if !v.is_empty() => s.scheme = v,
+                "appearance" if matches!(v.as_str(), "dark" | "light" | "system") => s.appearance = v,
                 "fps" => s.fps = v.parse().map(|f: u32| f.clamp(12, 240)).unwrap_or(s.fps),
-                "mode" => s.mode = if v == "ascii" { Mode::Ascii } else { Mode::Dither },
-                // `pattern` is 0.1's name; its three values are algorithm keys.
-                "algorithm" | "pattern" => s.algo = Algo::from_key(v).unwrap_or(s.algo),
-                "palette" if palettes::by_key(v).is_some() => s.palette = v.into(),
-                "strength" => s.strength = v.parse().map(|c: f32| c.clamp(0., 2.)).unwrap_or(s.strength),
-                "serpentine" => s.serpentine = flag(v, s.serpentine),
-                "match" => s.space = if v == "rgb" { Space::Rgb } else { Space::Oklab },
-                "cols" => s.cols = v.parse().map(|c: u32| c.clamp(16, 640)).unwrap_or(s.cols),
-                "scale" => s.scale = v.parse().map(|c: u32| c.clamp(1, 16)).unwrap_or(s.scale),
-                "brightness" => s.brightness = v.parse().map(|c: f32| c.clamp(-1., 1.)).unwrap_or(s.brightness),
-                "contrast" => s.contrast = v.parse().map(|c: f32| c.clamp(0.25, 3.)).unwrap_or(s.contrast),
-                "gamma" => s.gamma = v.parse().map(|c: f32| c.clamp(0.2, 5.)).unwrap_or(s.gamma),
-                "invert" => s.invert = flag(v, s.invert),
-                "ink" => s.accent_ink = v != "text",
-                "charset" => s.charset = Charset::ALL.into_iter().find(|c| charset_key(*c) == v).unwrap_or(s.charset),
-                "fit" => s.fit = if v == "tone" { Fit::Tone } else { Fit::Shape },
-                "ascii_cols" => s.ascii_cols = v.parse().map(|c: u32| c.clamp(16, 240)).unwrap_or(s.ascii_cols),
                 _ => {}
             }
         }
@@ -119,28 +40,11 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "# Darkroom settings.\nscheme = {}\nappearance = {}\nfps = {}\nmode = {}\nalgorithm = {}\npalette = {}\nstrength = {:.2}\n\
-             serpentine = {}\nmatch = {}\ncols = {}\nscale = {}\nbrightness = {:.2}\ncontrast = {:.2}\ngamma = {:.2}\ninvert = {}\nink = {}\n\
-             charset = {}\nfit = {}\nascii_cols = {}\n",
+            "# Darkroom settings.\nscheme = {}\nappearance = {}\nfps = {}\n{}",
             self.scheme,
             self.appearance,
             self.fps,
-            if self.mode == Mode::Ascii { "ascii" } else { "dither" },
-            self.algo.key(),
-            self.palette,
-            self.strength,
-            self.serpentine,
-            if self.space == Space::Rgb { "rgb" } else { "oklab" },
-            self.cols,
-            self.scale,
-            self.brightness,
-            self.contrast,
-            self.gamma,
-            self.invert,
-            if self.accent_ink { "accent" } else { "text" },
-            charset_key(self.charset),
-            if self.fit == Fit::Tone { "tone" } else { "shape" },
-            self.ascii_cols,
+            self.recipe.flat_lines()
         )
     }
 
@@ -173,6 +77,9 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Algo;
+    use crate::recipe::Mode;
+    use ferrite_design::ascii::Charset;
 
     #[test]
     fn round_trips() {
@@ -180,22 +87,7 @@ mod tests {
             scheme: "cyanotype".into(),
             appearance: "light".into(),
             fps: 25,
-            mode: Mode::Ascii,
-            algo: Algo::Stucki,
-            palette: "gameboy".into(),
-            strength: 0.75,
-            serpentine: false,
-            space: Space::Rgb,
-            cols: 320,
-            scale: 2,
-            brightness: -0.25,
-            contrast: 1.5,
-            gamma: 1.8,
-            invert: true,
-            accent_ink: false,
-            charset: Charset::Box,
-            fit: Fit::Tone,
-            ascii_cols: 120,
+            recipe: Recipe { mode: Mode::Ascii, algo: Algo::Stucki, palette: "gameboy".into(), cols: 320, gamma: 1.8, ..Recipe::default() },
         };
         assert_eq!(Settings::parse(&s.serialize()), s);
     }
@@ -203,33 +95,29 @@ mod tests {
     #[test]
     fn every_charset_round_trips() {
         for c in Charset::ALL {
-            let s = Settings { charset: c, ..Settings::default() };
-            assert_eq!(Settings::parse(&s.serialize()).charset, c);
-        }
-    }
-
-    #[test]
-    fn every_algorithm_and_palette_round_trips() {
-        for algo in Algo::ALL {
-            let s = Settings { algo, ..Settings::default() };
-            assert_eq!(Settings::parse(&s.serialize()).algo, algo);
-        }
-        for p in palettes::PRESETS {
-            let s = Settings { palette: p.key.into(), ..Settings::default() };
-            assert_eq!(Settings::parse(&s.serialize()).palette, p.key);
+            let s = Settings { recipe: Recipe { charset: c, ..Recipe::default() }, ..Settings::default() };
+            assert_eq!(Settings::parse(&s.serialize()).recipe.charset, c);
         }
     }
 
     #[test]
     fn reads_0_1_settings() {
-        assert_eq!(Settings::parse("pattern = blue-noise\n").algo, Algo::BlueNoise);
-        assert_eq!(Settings::parse("pattern = bayer\n").algo, Algo::Bayer4);
-        assert_eq!(Settings::parse("pattern = atkinson\n").algo, Algo::Atkinson);
+        let s = Settings::parse("scheme = phosphor\nmode = dither\npattern = blue-noise\ncols = 200\nink = text\n");
+        assert_eq!((s.scheme.as_str(), s.recipe.algo, s.recipe.cols, s.recipe.accent_ink), ("phosphor", Algo::BlueNoise, 200, false));
+        assert_eq!(Settings::parse("pattern = bayer\n").recipe.algo, Algo::Bayer4);
+        assert_eq!(Settings::parse("pattern = atkinson\n").recipe.algo, Algo::Atkinson);
+    }
+
+    #[test]
+    fn inline_comments_as_in_the_readme() {
+        let s = Settings::parse("scheme = ferrite      # ferrite mono graphite\nappearance = light   # dark | light\n");
+        assert_eq!((s.scheme.as_str(), s.appearance.as_str()), ("ferrite", "light"));
     }
 
     #[test]
     fn junk_is_clamped_or_ignored() {
-        let s = Settings::parse("cols = 99999\nscale = 0\nalgorithm = plaid\ncontrast = -4\npalette = nope\nstrength = 9\n");
-        assert_eq!((s.cols, s.scale, s.algo, s.contrast, s.palette.as_str(), s.strength), (640, 1, Algo::Atkinson, 0.25, "scheme", 2.));
+        let s = Settings::parse("cols = 99999\nscale = 0\nalgorithm = plaid\ncontrast = -4\npalette = nope\nstrength = 9\nfps = 1\n");
+        let r = &s.recipe;
+        assert_eq!((r.cols, r.scale, r.algo, r.contrast, r.palette.as_str(), r.strength, s.fps), (640, 1, Algo::Atkinson, 0.25, "scheme", 2., 12));
     }
 }

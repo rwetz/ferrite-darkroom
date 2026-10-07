@@ -1,0 +1,403 @@
+//! A recipe: everything about how a print is developed, and nothing about
+//! the window. It's what the settings file remembers between runs and what
+//! a `.toml` recipe file shares: save one, open it later or on another
+//! machine, and the same photo develops the same way.
+//!
+//! Both files are flat `key = value` lines, read by the same code. The
+//! settings file writes values bare; a recipe file writes valid TOML
+//! (quoted strings, arrays). The reader takes either, and ignores `#`
+//! comments, unknown keys and values out of range.
+
+use ferrite_design::ascii::{Charset, Fit};
+
+use crate::engine::{Algo, Params, Rgb, Space};
+use crate::palettes;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mode {
+    Dither,
+    Ascii,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recipe {
+    pub mode: Mode,
+    pub algo: Algo,
+    /// A preset key from `palettes::PRESETS`, or `palettes::CUSTOM`.
+    pub palette: String,
+    /// The custom palette's colours (imported or pasted).
+    pub colors: Vec<Rgb>,
+    /// 0..2: error carried, or how far the threshold map reaches.
+    pub strength: f32,
+    /// -1..1: where ink starts.
+    pub bias: f32,
+    pub serpentine: bool,
+    /// Where colours are matched.
+    pub space: Space,
+    /// For the random algorithm.
+    pub seed: u32,
+    /// Dither width in pixels.
+    pub cols: u32,
+    /// Each pixel's size in the exported PNG.
+    pub scale: u32,
+    pub brightness: f32,
+    pub contrast: f32,
+    pub gamma: f32,
+    pub invert: bool,
+    /// The Scheme palette inks in the accent rather than the text colour.
+    pub accent_ink: bool,
+    pub charset: Charset,
+    pub fit: Fit,
+    /// ASCII width in characters.
+    pub ascii_cols: u32,
+}
+
+impl Default for Recipe {
+    fn default() -> Self {
+        Recipe {
+            mode: Mode::Dither,
+            algo: Algo::Atkinson,
+            palette: palettes::SCHEME.into(),
+            colors: Vec::new(),
+            strength: 1.,
+            bias: 0.,
+            serpentine: true,
+            space: Space::Oklab,
+            seed: 1,
+            cols: 160,
+            scale: 4,
+            brightness: 0.,
+            contrast: 1.,
+            gamma: 1.,
+            invert: false,
+            accent_ink: true,
+            charset: Charset::Full,
+            fit: Fit::Shape,
+            ascii_cols: 80,
+        }
+    }
+}
+
+/// A value as written: bare (numbers, flags), text, or a list.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Bare(String),
+    Text(String),
+    List(Vec<String>),
+}
+
+impl Value {
+    fn as_str(&self) -> &str {
+        match self {
+            Value::Bare(s) | Value::Text(s) => s,
+            Value::List(_) => "",
+        }
+    }
+
+    /// Settings-file form: everything bare, lists space-separated.
+    fn flat(&self) -> String {
+        match self {
+            Value::Bare(s) | Value::Text(s) => s.clone(),
+            Value::List(items) => items.join(" "),
+        }
+    }
+
+    /// TOML form.
+    fn toml(&self) -> String {
+        let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+        match self {
+            Value::Bare(s) => s.clone(),
+            Value::Text(s) => quote(s),
+            Value::List(items) => format!("[{}]", items.iter().map(|s| quote(s)).collect::<Vec<_>>().join(", ")),
+        }
+    }
+}
+
+/// Cut a trailing `# comment`: a `#` after whitespace, outside quotes.
+fn strip_comment(v: &str) -> &str {
+    let mut quoted = false;
+    let mut prev_space = true;
+    for (i, ch) in v.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '#' if !quoted && prev_space => return v[..i].trim_end(),
+            _ => {}
+        }
+        prev_space = ch.is_whitespace();
+    }
+    v
+}
+
+fn unquote(s: &str) -> String {
+    let s = s.trim();
+    match s.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        Some(inner) => inner.replace("\\\"", "\"").replace("\\\\", "\\"),
+        None => s.to_string(),
+    }
+}
+
+/// Read one line into `(key, value)`, or `None` for blanks and comments.
+pub fn parse_line(line: &str) -> Option<(String, Value)> {
+    let line = line.trim();
+    if line.starts_with('#') || (line.starts_with('[') && !line.contains('=')) {
+        return None;
+    }
+    let (k, v) = line.split_once('=')?;
+    let v = strip_comment(v.trim());
+    let value = if let Some(inner) = v.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        Value::List(inner.split(',').map(unquote).filter(|s| !s.is_empty()).collect())
+    } else if v.starts_with('"') {
+        Value::Text(unquote(v))
+    } else {
+        Value::Bare(v.to_string())
+    };
+    Some((k.trim().to_string(), value))
+}
+
+fn charset_key(c: Charset) -> String {
+    c.name().replace(' ', "-")
+}
+
+fn flag(v: &str, default: bool) -> bool {
+    match v {
+        "true" | "on" | "yes" => true,
+        "false" | "off" | "no" => false,
+        _ => default,
+    }
+}
+
+/// `#rrggbb`, `rrggbb` or `0xrrggbb` → a colour.
+pub fn parse_hex(s: &str) -> Option<Rgb> {
+    let s = s.trim().trim_start_matches('#').trim_start_matches("0x");
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(s, 16).ok()?;
+    Some([(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff].map(|c| c as f32 / 255.))
+}
+
+pub fn hex(c: Rgb) -> String {
+    let [r, g, b] = c.map(|v| (v.clamp(0., 1.) * 255.).round() as u8);
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+impl Recipe {
+    /// Apply one `key = value`. Returns whether the key is a recipe key.
+    pub fn apply(&mut self, key: &str, value: &Value) -> bool {
+        let v = value.as_str();
+        let f = |lo: f32, hi: f32, cur: f32| v.parse().map(|x: f32| x.clamp(lo, hi)).unwrap_or(cur);
+        let u = |lo: u32, hi: u32, cur: u32| v.parse().map(|x: u32| x.clamp(lo, hi)).unwrap_or(cur);
+        match key {
+            "mode" => self.mode = if v == "ascii" { Mode::Ascii } else { Mode::Dither },
+            // `pattern` is 0.1's name; its three values are algorithm keys.
+            "algorithm" | "pattern" => self.algo = Algo::from_key(v).unwrap_or(self.algo),
+            "palette" => {
+                if palettes::by_key(v).is_some() || v == palettes::CUSTOM {
+                    self.palette = v.into();
+                }
+            }
+            "colors" => {
+                let items: Vec<String> = match value {
+                    Value::List(items) => items.clone(),
+                    other => other.as_str().split_whitespace().map(str::to_string).collect(),
+                };
+                let colors: Vec<Rgb> = items.iter().filter_map(|s| parse_hex(s)).collect();
+                if (2..=256).contains(&colors.len()) {
+                    self.colors = colors;
+                }
+            }
+            "strength" => self.strength = f(0., 2., self.strength),
+            "bias" => self.bias = f(-1., 1., self.bias),
+            "serpentine" => self.serpentine = flag(v, self.serpentine),
+            "match" => self.space = if v == "rgb" { Space::Rgb } else { Space::Oklab },
+            "seed" => self.seed = v.parse().unwrap_or(self.seed),
+            "cols" => self.cols = u(16, 640, self.cols),
+            "scale" => self.scale = u(1, 16, self.scale),
+            "brightness" => self.brightness = f(-1., 1., self.brightness),
+            "contrast" => self.contrast = f(0.25, 3., self.contrast),
+            "gamma" => self.gamma = f(0.2, 5., self.gamma),
+            "invert" => self.invert = flag(v, self.invert),
+            "ink" => self.accent_ink = v != "text",
+            "charset" => self.charset = Charset::ALL.into_iter().find(|c| charset_key(*c) == v).unwrap_or(self.charset),
+            "fit" => self.fit = if v == "tone" { Fit::Tone } else { Fit::Shape },
+            "ascii_cols" => self.ascii_cols = u(16, 240, self.ascii_cols),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Every key, in file order.
+    pub fn pairs(&self) -> Vec<(&'static str, Value)> {
+        let bare = |s: String| Value::Bare(s);
+        let text = |s: &str| Value::Text(s.to_string());
+        let mut out = vec![
+            ("mode", text(if self.mode == Mode::Ascii { "ascii" } else { "dither" })),
+            ("algorithm", text(self.algo.key())),
+            ("palette", text(&self.palette)),
+        ];
+        if !self.colors.is_empty() {
+            out.push(("colors", Value::List(self.colors.iter().map(|&c| hex(c)).collect())));
+        }
+        out.extend([
+            ("strength", bare(format!("{:.2}", self.strength))),
+            ("bias", bare(format!("{:.2}", self.bias))),
+            ("serpentine", bare(self.serpentine.to_string())),
+            ("match", text(if self.space == Space::Rgb { "rgb" } else { "oklab" })),
+            ("seed", bare(self.seed.to_string())),
+            ("cols", bare(self.cols.to_string())),
+            ("scale", bare(self.scale.to_string())),
+            ("brightness", bare(format!("{:.2}", self.brightness))),
+            ("contrast", bare(format!("{:.2}", self.contrast))),
+            ("gamma", bare(format!("{:.2}", self.gamma))),
+            ("invert", bare(self.invert.to_string())),
+            ("ink", text(if self.accent_ink { "accent" } else { "text" })),
+            ("charset", text(&charset_key(self.charset))),
+            ("fit", text(if self.fit == Fit::Tone { "tone" } else { "shape" })),
+            ("ascii_cols", bare(self.ascii_cols.to_string())),
+        ]);
+        out
+    }
+
+    /// The settings-file lines (bare values; `#` dropped from colours so
+    /// they can't be mistaken for comments).
+    pub fn flat_lines(&self) -> String {
+        self.pairs()
+            .into_iter()
+            .map(|(k, v)| {
+                let v = if k == "colors" { v.flat().replace('#', "") } else { v.flat() };
+                format!("{k} = {v}\n")
+            })
+            .collect()
+    }
+
+    /// A recipe file: valid TOML.
+    pub fn to_toml(&self) -> String {
+        let mut s = String::from("# A Darkroom recipe. Open it in Darkroom (Ctrl+Shift+O, or drop it on the print).\n");
+        for (k, v) in self.pairs() {
+            s.push_str(&format!("{k} = {}\n", v.toml()));
+        }
+        s
+    }
+
+    /// Read a recipe file. Starts from the defaults, so a partial recipe
+    /// is a complete one.
+    pub fn from_toml(src: &str) -> Result<Recipe, String> {
+        let mut r = Recipe::default();
+        let mut known = 0;
+        for (k, v) in src.lines().filter_map(parse_line) {
+            if r.apply(&k, &v) {
+                known += 1;
+            }
+        }
+        if known == 0 {
+            return Err("there's no Darkroom recipe in that file".into());
+        }
+        Ok(r)
+    }
+
+    pub fn params(&self) -> Params {
+        Params { algo: self.algo, strength: self.strength, bias: self.bias, serpentine: self.serpentine, space: self.space, seed: self.seed }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fancy() -> Recipe {
+        Recipe {
+            mode: Mode::Ascii,
+            algo: Algo::Stucki,
+            palette: palettes::CUSTOM.into(),
+            colors: vec![[0., 0., 0.], [1., 0.4, 0.2], [1., 1., 1.]],
+            strength: 0.75,
+            bias: -0.3,
+            serpentine: false,
+            space: Space::Rgb,
+            seed: 42,
+            cols: 320,
+            scale: 2,
+            brightness: -0.25,
+            contrast: 1.5,
+            gamma: 1.8,
+            invert: true,
+            accent_ink: false,
+            charset: Charset::Box,
+            fit: Fit::Tone,
+            ascii_cols: 120,
+        }
+    }
+
+    fn close(a: &Recipe, b: &Recipe) -> bool {
+        // Colours go through 8-bit hex.
+        let colors = a.colors.len() == b.colors.len() && a.colors.iter().zip(&b.colors).all(|(x, y)| x.iter().zip(y).all(|(p, q)| (p - q).abs() < 0.003));
+        colors && Recipe { colors: vec![], ..a.clone() } == Recipe { colors: vec![], ..b.clone() }
+    }
+
+    #[test]
+    fn toml_round_trips() {
+        let r = fancy();
+        let back = Recipe::from_toml(&r.to_toml()).unwrap();
+        assert!(close(&r, &back), "{back:?}");
+    }
+
+    #[test]
+    fn flat_round_trips() {
+        let r = fancy();
+        let mut back = Recipe::default();
+        for (k, v) in r.flat_lines().lines().filter_map(parse_line) {
+            assert!(back.apply(&k, &v), "{k}");
+        }
+        assert!(close(&r, &back), "{back:?}");
+    }
+
+    #[test]
+    fn toml_is_toml_shaped() {
+        let t = fancy().to_toml();
+        assert!(t.contains("algorithm = \"stucki\""));
+        assert!(t.contains("colors = [\"#000000\", \"#ff6633\", \"#ffffff\"]"));
+        assert!(t.contains("strength = 0.75"));
+        assert!(t.contains("serpentine = false"));
+    }
+
+    #[test]
+    fn comments_and_junk() {
+        let r = Recipe::from_toml("# hi\n[recipe]\nalgorithm = \"sierra\"   # a comment\ncols = 99999\nnonsense = 3\npalette = \"nope\"\n").unwrap();
+        assert_eq!((r.algo, r.cols, r.palette.as_str()), (Algo::Sierra, 640, "scheme"));
+        assert!(Recipe::from_toml("hello = world\n").is_err());
+        assert!(Recipe::from_toml("").is_err());
+    }
+
+    #[test]
+    fn every_algorithm_and_palette_round_trips() {
+        for algo in Algo::ALL {
+            let r = Recipe { algo, ..Recipe::default() };
+            assert_eq!(Recipe::from_toml(&r.to_toml()).unwrap().algo, algo);
+        }
+        for p in palettes::PRESETS {
+            let r = Recipe { palette: p.key.into(), ..Recipe::default() };
+            assert_eq!(Recipe::from_toml(&r.to_toml()).unwrap().palette, p.key);
+        }
+    }
+
+    #[test]
+    fn bundled_recipes_load() {
+        let gb = Recipe::from_toml(include_str!("../recipes/gameboy.toml")).unwrap();
+        assert_eq!((gb.algo, gb.palette.as_str()), (Algo::Bayer4, "gameboy"));
+        let news = Recipe::from_toml(include_str!("../recipes/newsprint.toml")).unwrap();
+        assert_eq!((news.algo, news.palette.as_str(), news.cols), (Algo::Halftone, "bw", 320));
+        let sunset = Recipe::from_toml(include_str!("../recipes/sunset.toml")).unwrap();
+        assert_eq!((sunset.algo, sunset.palette.as_str(), sunset.colors.len(), sunset.bias), (Algo::Bayer8, palettes::CUSTOM, 7, 0.2));
+        let engraving = Recipe::from_toml(include_str!("../recipes/engraving.toml")).unwrap();
+        assert_eq!((engraving.algo, engraving.accent_ink, engraving.scale), (Algo::Atkinson, false, 3));
+    }
+
+    #[test]
+    fn hex_parsing() {
+        assert_eq!(parse_hex("#ff8000"), Some([1., 128. / 255., 0.]));
+        assert_eq!(parse_hex("0x000000"), Some([0.; 3]));
+        assert_eq!(parse_hex("fff"), None);
+        assert_eq!(parse_hex("zzzzzz"), None);
+        assert_eq!(hex([1., 0.5, 0.]), "#ff8000");
+    }
+}

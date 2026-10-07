@@ -274,6 +274,10 @@ pub struct Params {
     /// 0..2. Error diffusion: how much error is carried (0 = posterise).
     /// Ordered: how far the threshold map reaches.
     pub strength: f32,
+    /// -1..1: shifts where ink starts. Ordered algorithms move the tone;
+    /// error diffusion mostly changes the texture, since the carried error
+    /// pulls the tone back.
+    pub bias: f32,
     /// Error diffusion runs alternate rows right to left.
     pub serpentine: bool,
     pub space: Space,
@@ -283,9 +287,12 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
-        Params { algo: Algo::FloydSteinberg, strength: 1., serpentine: true, space: Space::Oklab, seed: 1 }
+        Params { algo: Algo::FloydSteinberg, strength: 1., bias: 0., serpentine: true, space: Space::Oklab, seed: 1 }
     }
 }
+
+/// How far a full bias moves the threshold, as a share of the tonal range.
+const BIAS_REACH: f32 = 0.45;
 
 /// Dither `pixels` (`w`×`h`, row-major sRGB) to `palette`. Returns one
 /// palette index per pixel. An empty palette gives all zeros.
@@ -312,7 +319,13 @@ pub fn dither(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params) -> Vec
         Space::Oklab => (fitted.collect(), pal_lab),
         Space::Rgb => (fitted.map(from_oklab).collect(), palette.to_vec()),
     };
+    // The bias nudges which colour is picked, not the value carried on.
+    let lean = p.bias * BIAS_REACH * (hi - lo).max(0.05);
     let nearest = |v: [f32; 3]| -> usize {
+        let v = match p.space {
+            Space::Oklab => [v[0] + lean, v[1], v[2]],
+            Space::Rgb => [v[0] + lean, v[1] + lean, v[2] + lean],
+        };
         let mut best = (0, f32::MAX);
         for (i, c) in pal.iter().enumerate() {
             let d = (v[0] - c[0]).powi(2) + (v[1] - c[1]).powi(2) + (v[2] - c[2]).powi(2);
@@ -375,6 +388,7 @@ pub fn dither(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params) -> Vec
 fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params) -> Vec<u8> {
     let (dark, light) = if pal[0][0] <= pal[1][0] { (0u8, 1u8) } else { (1, 0) };
     let mut level: Vec<f32> = pixels.iter().map(|&c| oklab(c)[0].clamp(0., 1.)).collect();
+    let cut = 0.5 - p.bias * BIAS_REACH;
     if let Some((taps, div)) = p.algo.kernel() {
         let mut out = vec![dark; level.len()];
         let (wi, hi) = (w as i32, h as i32);
@@ -384,7 +398,7 @@ fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params) -> Vec<u
                 let x = if rtl { wi - 1 - i } else { i };
                 let at = (y * wi + x) as usize;
                 let v = level[at];
-                let on = v > 0.5;
+                let on = v > cut;
                 out[at] = if on { light } else { dark };
                 let err = (v - if on { 1. } else { 0. }) * p.strength;
                 for &(dx, dy, wt) in taps {
@@ -402,7 +416,7 @@ fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params) -> Vec<u
         .enumerate()
         .map(|(i, &v)| {
             let (x, y) = (i as u32 % w, i as u32 / w);
-            let t = 0.5 + (p.algo.threshold(x, y, p.seed) - 0.5) * p.strength.min(1.);
+            let t = cut + (p.algo.threshold(x, y, p.seed) - 0.5) * p.strength.min(1.);
             if v > t { light } else { dark }
         })
         .collect()
@@ -524,6 +538,21 @@ mod tests {
             assert!(back.iter().zip(c).all(|(b, c)| (b - c).abs() < 1e-3), "{c:?} → {back:?}");
         }
         assert!((oklab([1., 1., 1.])[0] - 1.).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bias_moves_ordered_tone() {
+        let (w, h) = (32, 32);
+        let px = vec![[0.5f32; 3]; (w * h) as usize];
+        let lit = |bias: f32| {
+            let out = dither(&px, w, h, &BW, Params { algo: Algo::Bayer8, bias, ..Params::default() });
+            out.iter().filter(|v| **v == 1).count()
+        };
+        assert!(lit(0.5) > lit(0.) && lit(0.) > lit(-0.5), "{} {} {}", lit(-0.5), lit(0.), lit(0.5));
+        // Diffusion: the texture changes but stays a dither of the same grey.
+        let fs = dither(&px, w, h, &BW, Params { bias: 0.5, ..Params::default() });
+        let share = fs.iter().filter(|v| **v == 1).count() as f32 / fs.len() as f32;
+        assert!((share - 0.6).abs() < 0.1, "{share}");
     }
 
     #[test]

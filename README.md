@@ -41,7 +41,8 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
     Floyd–Steinberg, Shiau–Fan and Shiau–Fan 2, with a serpentine switch.
   - *Ordered:* Bayer 2×2, 4×4, 8×8 and 16×16, blue noise, interleaved
     gradient noise, an 8×8 halftone dot, random, and plain threshold.
-  - *Strength* from 0 (flat posterise) to 200% (crunchy).
+  - *Strength* from 0 (flat posterise) to 200% (crunchy), and a
+    *threshold* that moves where ink starts.
   The preview draws whole device pixels per art pixel, so it's exactly the
   export.
 - **ASCII.** All thirteen of ferrite-design's character sets, from classic
@@ -56,6 +57,15 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   palette without a true black or white still gets the photo's whole tonal
   range. Two-colour palettes dither by lightness, so any ink on any paper
   keeps every tone.
+- **Your own palettes.** Import one from [Lospec](https://lospec.com/palette-list)
+  or anywhere else: `.hex`, GIMP `.gpl`, JASC `.pal`, paint.net `.txt`, or a
+  palette image (its distinct colours). Or copy hex colours from anywhere and
+  *Paste hex*. Dropping a palette file on the print imports it too.
+- **Recipes.** Everything about how a print develops (algorithm, palette,
+  tone, sizes) saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
+  Open one (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>, or drop it on the
+  print) to develop any photo the same way. Four come in `recipes/`:
+  Game Boy, newsprint halftone, a seven-colour sunset, and an engraving.
 - **Export.** A PNG in the palette's exact colours at 1×, 2×, 4× or 8× pixel size
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), the ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the
@@ -94,8 +104,8 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Configuration
 
-Darkroom remembers the look and the last process you used, as plain
-`key = value` lines:
+Darkroom remembers the look and the last recipe you used, as plain
+`key = value` lines (a recipe file uses the same keys, in TOML):
 
 | OS | Settings |
 |---|---|
@@ -111,10 +121,13 @@ algorithm = atkinson  # floyd-steinberg atkinson jarvis-judice-ninke stucki burk
                       # sierra-lite false-floyd-steinberg shiau-fan shiau-fan-2 bayer-2 bayer bayer-8
                       # bayer-16 blue-noise gradient-noise halftone random threshold
 palette = scheme      # scheme bw rgb cmyk 3-bit gameboy teletext apple-ii c64 zx-spectrum 6-bit
-                      # 2-bit-grey vaporwave hacker
+                      # 2-bit-grey vaporwave hacker custom
+colors = 0f380f 306230 8bac0f 9bbc0f   # palette = custom: its colours
 strength = 1.00       # 0 to 2
+bias = 0.00           # -1 to 1: the threshold
 serpentine = true     # error diffusion alternates direction per row
 match = oklab         # oklab | rgb
+seed = 1              # for algorithm = random
 cols = 160            # dither width in pixels
 scale = 4             # PNG pixel size
 brightness = 0.00     # -1 to 1
@@ -157,7 +170,9 @@ cargo clippy --all-targets
 
 - `src/engine.rs`: the dither engine: every algorithm, Oklab colour
   matching, palette mapping. Pure and unit-tested.
-- `src/palettes.rs`: the preset palettes.
+- `src/palettes.rs`: the preset palettes and palette-file import.
+- `src/recipe.rs`: the recipe, read and written as settings lines or TOML.
+- `recipes/`: example recipes; tests check each one loads.
 - `src/studio.rs`: the process around it: loading, the working print,
   adjustments, PNG and preview pixels, ASCII. Pure and unit-tested; the
   preview and the exports both run it.
