@@ -17,6 +17,9 @@ ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "ebf7e
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+# Exact-palette GIF and APNG encoding (image's own GIF encoder requantises).
+gif = "0.14"
+png = "0.18"
 
 # gpui is sluggish unoptimised; optimise dependencies even in dev builds.
 [profile.dev.package."*"]

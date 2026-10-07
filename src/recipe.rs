@@ -37,6 +37,10 @@ pub struct Recipe {
     pub space: Space,
     /// For the random algorithm.
     pub seed: u32,
+    /// Animations: 0..1, how firmly unchanged pixels hold between frames.
+    pub stability: f32,
+    /// Animations: playback and export speed, 0.25..4.
+    pub speed: f32,
     /// Dither width in pixels.
     pub cols: u32,
     /// Each pixel's size in the exported PNG.
@@ -72,6 +76,8 @@ impl Default for Recipe {
             serpentine: true,
             space: Space::Oklab,
             seed: 1,
+            stability: 0.5,
+            speed: 1.,
             cols: 160,
             scale: 4,
             shape: Shape::Square,
@@ -225,6 +231,8 @@ impl Recipe {
             "serpentine" => self.serpentine = flag(v, self.serpentine),
             "match" => self.space = if v == "rgb" { Space::Rgb } else { Space::Oklab },
             "seed" => self.seed = v.parse().unwrap_or(self.seed),
+            "stability" => self.stability = f(0., 1., self.stability),
+            "speed" => self.speed = f(0.25, 4., self.speed),
             "cols" => self.cols = u(16, 640, self.cols),
             "scale" => self.scale = u(1, 16, self.scale),
             "shape" => self.shape = Shape::from_key(v).unwrap_or(self.shape),
@@ -264,6 +272,8 @@ impl Recipe {
             ("serpentine", bare(self.serpentine.to_string())),
             ("match", text(if self.space == Space::Rgb { "rgb" } else { "oklab" })),
             ("seed", bare(self.seed.to_string())),
+            ("stability", bare(format!("{:.2}", self.stability))),
+            ("speed", bare(format!("{:.2}", self.speed))),
             ("cols", bare(self.cols.to_string())),
             ("scale", bare(self.scale.to_string())),
             ("shape", text(self.shape.key())),
@@ -325,6 +335,20 @@ impl Recipe {
         Look { shape: self.shape, gutter: self.gutter, modulate: self.modulate, paper: self.paper, transparent: self.transparent, lattice: self.lattice }
     }
 
+    /// Whether the custom palette is chosen and has its colours.
+    pub fn uses_custom(&self) -> bool {
+        self.palette == palettes::CUSTOM && self.colors.len() >= 2
+    }
+
+    /// The colours the art develops in. `paper` and `ink` are the scheme's,
+    /// for the Scheme palette.
+    pub fn palette_colors(&self, paper: Rgb, ink: Rgb) -> Vec<Rgb> {
+        if self.uses_custom() {
+            return self.colors.clone();
+        }
+        palettes::by_key(&self.palette).unwrap_or(&palettes::PRESETS[0]).colors(paper, ink)
+    }
+
     pub fn params(&self) -> Params {
         Params { algo: self.algo, strength: self.strength, bias: self.bias, serpentine: self.serpentine, space: self.space, seed: self.seed }
     }
@@ -345,6 +369,8 @@ mod tests {
             serpentine: false,
             space: Space::Rgb,
             seed: 42,
+            stability: 0.8,
+            speed: 1.5,
             cols: 320,
             scale: 2,
             shape: Shape::Diamond,

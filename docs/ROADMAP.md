@@ -165,7 +165,12 @@ Progress is marked inline: ✅ done, everything else still to do.
    is still to do); ✅ contact sheet of algorithms and palettes; ✅ undo/redo.
    Original scope: Cell shapes, gutter, transparent paper,
    background field; before/after; contact sheet; undo.
-3. **0.4: GIF.** Import, timeline, temporal stability, GIF/APNG/WebP
+3. **0.4: GIF.** ✅ GIF / APNG / animated WebP in, a timeline, temporal
+   stability (inside error diffusion, so nothing gets frozen), speed;
+   ✅ GIF (exact palette) / APNG / sprite-sheet export; ✅ batch; ✅ CLI.
+   *Not done:* animated WebP export (the `image` crate only writes still
+   WebP; it needs libwebp, which isn't worth a C dependency yet).
+   Original scope: Import, timeline, temporal stability, GIF/APNG/WebP
    export, batch, CLI.
 4. **0.5: masks and layers.** Luma/colour key, paint mask, layers with
    per-layer recipes; then ONNX subject segmentation.

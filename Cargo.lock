@@ -1563,9 +1563,11 @@ name = "ferrite-darkroom"
 version = "0.1.1"
 dependencies = [
  "ferrite-design",
+ "gif",
  "gpui-pre",
  "gpui-pre-platform",
  "image",
+ "png 0.18.1",
  "winresource",
 ]
 
