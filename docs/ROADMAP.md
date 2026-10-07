@@ -159,7 +159,11 @@ Progress is marked inline: ✅ done, everything else still to do.
    Atkinson, Shiau–Fan); Bayer 2–16; strength, gamma, threshold;
    multi-colour palettes with the 13 presets; Oklab matching; preset row;
    recipe TOML.
-2. **0.3: render and compare.** Cell shapes, gutter, transparent paper,
+2. **0.3: render and compare.** ✅ Cell shapes (square, circle, diamond,
+   plus), gutter, size by tone, paper choice, transparent paper, a dot
+   lattice; ✅ compare (split, set by a slider; dragging on the print itself
+   is still to do); ✅ contact sheet of algorithms and palettes; ✅ undo/redo.
+   Original scope: Cell shapes, gutter, transparent paper,
    background field; before/after; contact sheet; undo.
 3. **0.4: GIF.** Import, timeline, temporal stability, GIF/APNG/WebP
    export, batch, CLI.

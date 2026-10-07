@@ -57,6 +57,18 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   palette without a true black or white still gets the photo's whole tonal
   range. Two-colour palettes dither by lightness, so any ink on any paper
   keeps every tone.
+- **Pixels as shapes.** Draw each pixel as a square, circle, diamond or plus,
+  with a gutter between them, dots that swell with the light (*size by
+  tone*), a choice of which colour is the paper, transparent paper for PNGs,
+  and a lattice of dots over the bare paper. It's how you get halftone dot
+  grids and LED-board looks. Shapes show once a pixel is 3 px or more: in
+  the preview, and in 4× and 8× PNGs.
+- **Compare and contact sheet.** *Compare* puts the photo left of a split
+  and the art right of it. *Contact sheet* shows the print through all
+  twenty algorithms, or every palette, side by side; click one to use it.
+- **Undo.** <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd>
+  (or <kbd>Ctrl</kbd>+<kbd>Y</kbd>) step through every change to the
+  recipe; a slider drag undoes in one step.
 - **Your own palettes.** Import one from [Lospec](https://lospec.com/palette-list)
   or anywhere else: `.hex`, GIMP `.gpl`, JASC `.pal`, paint.net `.txt`, or a
   palette image (its distinct colours). Or copy hex colours from anywhere and
@@ -64,8 +76,9 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 - **Recipes.** Everything about how a print develops (algorithm, palette,
   tone, sizes) saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
   Open one (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>, or drop it on the
-  print) to develop any photo the same way. Four come in `recipes/`:
-  Game Boy, newsprint halftone, a seven-colour sunset, and an engraving.
+  print) to develop any photo the same way. Five come in `recipes/`:
+  Game Boy, newsprint halftone, a seven-colour sunset, an engraving, and
+  a dot lattice.
 - **Export.** A PNG in the palette's exact colours at 1×, 2×, 4× or 8× pixel size
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), the ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the
@@ -130,6 +143,12 @@ match = oklab         # oklab | rgb
 seed = 1              # for algorithm = random
 cols = 160            # dither width in pixels
 scale = 4             # PNG pixel size
+shape = square        # square | circle | diamond | plus
+gutter = 0.00         # 0 to 0.9: gap between pixels
+modulate = false      # size by tone
+paper = first         # first | darkest | lightest: the palette colour shapes sit on
+transparent = false   # leave the paper transparent in PNGs
+lattice = 0.00        # 0 to 1: dots over the bare paper
 brightness = 0.00     # -1 to 1
 contrast = 1.00       # 0.25 to 3
 gamma = 1.00          # 0.2 to 5
@@ -172,6 +191,8 @@ cargo clippy --all-targets
   matching, palette mapping. Pure and unit-tested.
 - `src/palettes.rs`: the preset palettes and palette-file import.
 - `src/recipe.rs`: the recipe, read and written as settings lines or TOML.
+- `src/render.rs`: how art pixels are drawn (shapes, gutter, paper,
+  lattice) for the preview and PNGs, and the compare view's "before".
 - `recipes/`: example recipes; tests check each one loads.
 - `src/studio.rs`: the process around it: loading, the working print,
   adjustments, PNG and preview pixels, ASCII. Pure and unit-tested; the

@@ -1,0 +1,10 @@
+# A Darkroom recipe: a lattice of round dots that swell with the light,
+# black and white. Shapes show at 4x and 8x PNG pixel sizes.
+mode = "dither"
+algorithm = "bayer-8"
+palette = "bw"
+shape = "circle"
+gutter = 0.15
+modulate = true
+cols = 120
+scale = 8

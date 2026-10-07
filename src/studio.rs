@@ -179,48 +179,15 @@ pub fn rows_for(print: &Print, cols: u32) -> u32 {
     ((cols as f32 * print.aspect()).round() as u32).max(1)
 }
 
-/// A developed print: one palette index per pixel, and the palette.
+/// A developed print: one palette index per pixel, the palette, and the
+/// photo's Oklab lightness per pixel (for shapes sized by tone).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Art {
     pub w: u32,
     pub h: u32,
     pub index: Vec<u8>,
     pub colors: Vec<Rgb>,
-}
-
-impl Art {
-    fn rgb8(&self) -> Vec<[u8; 3]> {
-        self.colors.iter().map(|c| c.map(|v| (v * 255.).round() as u8)).collect()
-    }
-
-    /// BGRA bytes with each art pixel `cell`×`cell`: what the preview uploads.
-    pub fn bgra(&self, cell: u32) -> (u32, u32, Vec<u8>) {
-        let cell = cell.max(1);
-        let (w, h) = (self.w * cell, self.h * cell);
-        let lut: Vec<[u8; 4]> = self.rgb8().iter().map(|[r, g, b]| [*b, *g, *r, 255]).collect();
-        let mut out = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            let row = &self.index[((y / cell) * self.w) as usize..][..self.w as usize];
-            for &i in row {
-                for _ in 0..cell {
-                    out.extend_from_slice(&lut[i as usize]);
-                }
-            }
-        }
-        (w, h, out)
-    }
-
-    /// A PNG with each art pixel `scale`×`scale`.
-    pub fn png(&self, scale: u32) -> Result<Vec<u8>, String> {
-        let scale = scale.max(1);
-        let lut = self.rgb8();
-        let img = image::RgbImage::from_fn(self.w * scale, self.h * scale, |x, y| {
-            image::Rgb(lut[self.index[((y / scale) * self.w + x / scale) as usize] as usize])
-        });
-        let mut out = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-        Ok(out.into_inner())
-    }
+    pub lum: Vec<f32>,
 }
 
 /// Develop the print at `cols`×rows into `palette`.
@@ -228,7 +195,8 @@ pub fn develop(print: &Print, cols: u32, adjust: Adjust, palette: Vec<Rgb>, para
     let small = print.resize(cols, rows_for(print, cols));
     let pixels: Vec<Rgb> = small.rgb.iter().map(|&c| adjust.color(c)).collect();
     let index = engine::dither(&pixels, small.w, small.h, &palette, params);
-    Art { w: small.w, h: small.h, index, colors: palette }
+    let lum = pixels.iter().map(|&c| engine::oklab(c)[0]).collect();
+    Art { w: small.w, h: small.h, index, colors: palette, lum }
 }
 
 /// The print as text, `cols` characters wide.
@@ -309,24 +277,14 @@ mod tests {
     #[test]
     fn png_is_scaled_and_in_the_palette() {
         let art = develop(&ramp(16, 8), 16, Adjust::default(), vec![PAPER, INK], Params { algo: Algo::Bayer4, ..Params::default() });
-        let bytes = art.png(4).unwrap();
+        assert_eq!(art.lum.len(), 16 * 8);
+        let bytes = crate::render::png(&art, 4, crate::render::Look::default()).unwrap();
         let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
         assert_eq!(img.dimensions(), (64, 32));
-        let lut = art.rgb8();
+        let lut: Vec<[u8; 3]> = art.colors.iter().map(|c| c.map(|v| (v * 255.).round() as u8)).collect();
         assert!(img.pixels().all(|p| lut.contains(&p.0)));
         // A 4×4 block is one art pixel.
         assert_eq!(img.get_pixel(0, 0), img.get_pixel(3, 3));
-    }
-
-    #[test]
-    fn bgra_matches_the_png() {
-        let art = develop(&sample(), 40, Adjust::default(), vec![PAPER, INK], Params::default());
-        let (w, h, bytes) = art.bgra(3);
-        assert_eq!((w, h, bytes.len()), (120, art.h * 3, (120 * art.h * 3 * 4) as usize));
-        let png = image::load_from_memory(&art.png(3).unwrap()).unwrap().to_rgb8();
-        for (i, px) in png.pixels().enumerate().step_by(97) {
-            assert_eq!([bytes[i * 4 + 2], bytes[i * 4 + 1], bytes[i * 4]], px.0);
-        }
     }
 
     #[test]
