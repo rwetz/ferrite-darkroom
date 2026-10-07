@@ -6,7 +6,26 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
-The 0.5 milestone in [the roadmap](docs/ROADMAP.md): masks and layers.
+The 0.6 milestone in [the roadmap](docs/ROADMAP.md): the text-art engine.
+
+### Added
+
+- Glyph sets beyond characters: braille (2×4 dots a cell), half blocks,
+  quadrants, each dithered at sub-cell resolution with any algorithm; and
+  colour half blocks (`▀` with a palette colour above and below).
+- Cell colour: ink, the photo's own colours, or the nearest palette colour.
+- Exports: ANSI with 24-bit colour, HTML (colours as shared classes), SVG
+  (runs stretched to the cell grid, so any monospace font lines up), and a
+  PNG of braille and block art.
+- The ASCII film: an animation's text art as one HTML page that plays
+  itself; ASCII mode plays animations in the app too.
+- Braille and block art preview as pixels, so missing glyphs in the display
+  face can't misalign the grid.
+- The command line writes `.ans`, `.html` and `.svg`.
+
+## 0.5 (merged, not yet released)
+
+Masks and layers.
 
 ### Added
 

@@ -283,12 +283,6 @@ pub fn ascii_lines(print: &Print, cols: usize, adjust: Adjust, charset: Charset,
     ascii::picture_art(&pic, cols, style)
 }
 
-pub fn text(lines: &[String]) -> String {
-    let mut s = lines.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
-    s.push('\n');
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,8 +381,6 @@ mod tests {
         let lines = ascii_lines(&sample(), 60, Adjust::default(), Charset::Classic, Fit::Tone);
         assert!(lines.len() > 5);
         assert!(lines.iter().all(|l| l.chars().count() == 60));
-        let t = text(&lines);
-        assert!(t.ends_with('\n') && !t.contains(" \n"));
     }
 
     #[test]
