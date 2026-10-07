@@ -52,6 +52,8 @@ jobs:
           # The font licenses ship with ferrite-design's source in cargo's git checkout.
           fonts=$(find ~/.cargo/git/checkouts -path '*ferrite-design*/assets/fonts' -type d | head -1)
           cp "$fonts"/LICENSE-* "$name/licenses/"
+          # And the fonts Darkroom bundles for text art.
+          cp assets/fonts/LICENSE-* assets/fonts/OFL-* "$name/licenses/"
           if [ "${{ matrix.archive }}" = zip ]; then
             7z a "$name.zip" "$name" > /dev/null
           else

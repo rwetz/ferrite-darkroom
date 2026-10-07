@@ -6,8 +6,6 @@
 
 use std::path::Path;
 
-use ferrite_design::ascii::{self, ArtStyle, Charset, Fit};
-use ferrite_design::dither::Picture;
 
 use crate::engine::{self, Params, Rgb};
 use crate::mask;
@@ -38,6 +36,17 @@ impl Print {
 
     pub fn aspect(&self) -> f32 {
         self.h as f32 / self.w.max(1) as f32
+    }
+
+    /// The part `[x, y, w, h]` (0..1 each way) of the print.
+    pub fn crop(&self, [x, y, w, h]: [f32; 4]) -> Print {
+        if [x, y, w, h] == [0., 0., 1., 1.] {
+            return self.clone();
+        }
+        let (x0, y0) = ((x * self.w as f32).round() as u32, (y * self.h as f32).round() as u32);
+        let (cw, ch) = (((w * self.w as f32).round() as u32).clamp(1, self.w - x0.min(self.w - 1)), ((h * self.h as f32).round() as u32).clamp(1, self.h - y0.min(self.h - 1)));
+        let rgb = (y0..y0 + ch).flat_map(|yy| (x0..x0 + cw).map(move |xx| (xx, yy))).map(|(xx, yy)| self.rgb[(yy * self.w + xx) as usize]).collect();
+        Print::from_rgb(cw, ch, rgb)
     }
 
     /// Area-averaged resample to `w`×`h`.
@@ -139,17 +148,38 @@ pub struct Adjust {
     /// light parts of the photo get the ink. ASCII only; a dither's palette
     /// decides this itself.
     pub light_ink: bool,
+    /// Levels, applied first: tones at or under `black` go to 0, at or
+    /// over `white` to 1.
+    pub black: f32,
+    pub white: f32,
 }
 
 impl Default for Adjust {
     fn default() -> Self {
-        Adjust { brightness: 0., contrast: 1., gamma: 1., invert: false, light_ink: true }
+        Adjust { brightness: 0., contrast: 1., gamma: 1., invert: false, light_ink: true, black: 0., white: 1. }
     }
 }
 
 impl Adjust {
-    /// One channel (or a luminance) through brightness, contrast and gamma.
+    /// The recipe's tone controls. Auto levels measure `reference` (an
+    /// animation's first frame, so the levels hold still across frames).
+    pub fn new(r: &Recipe, light_ink: bool, reference: &Print) -> Adjust {
+        let (lo, hi) = if r.auto_levels { levels(reference) } else { (0., 1.) };
+        Adjust {
+            brightness: r.brightness,
+            contrast: r.contrast,
+            gamma: r.gamma,
+            invert: r.invert,
+            light_ink,
+            black: lo + r.black * (hi - lo),
+            white: lo + r.white * (hi - lo),
+        }
+    }
+
+    /// One channel (or a luminance) through levels, brightness, contrast
+    /// and gamma.
     fn tone(&self, v: f32) -> f32 {
+        let v = ((v - self.black) / (self.white - self.black).max(0.01)).clamp(0., 1.);
         let v = ((v - 0.5) * self.contrast + 0.5 + self.brightness * 0.5).clamp(0., 1.);
         v.powf(1. / self.gamma.max(0.05))
     }
@@ -161,6 +191,28 @@ impl Adjust {
             if self.invert { 1. - v } else { v }
         })
     }
+}
+
+/// The photo's own tonal range: its 1st and 99th percentile luminance, so
+/// a stray highlight doesn't hold the levels back.
+pub fn levels(print: &Print) -> (f32, f32) {
+    let mut hist = [0u32; 256];
+    for &l in &print.lum {
+        hist[(l.clamp(0., 1.) * 255.).round() as usize] += 1;
+    }
+    let n = print.lum.len().max(1) as f32;
+    let at = |q: f32| {
+        let mut seen = 0.;
+        hist.iter().position(|&c| {
+            seen += c as f32;
+            seen >= q * n
+        })
+        .unwrap_or(255) as f32
+            / 255.
+    };
+    let (lo, hi) = (at(0.01), at(0.99));
+    // A flat picture has nothing to stretch.
+    if hi - lo < 0.1 { (0., 1.) } else { (lo, hi) }
 }
 
 /// Ink levels (0 = paper, 255 = ink) for a print, quantised once so the
@@ -273,16 +325,6 @@ fn dither_held(pixels: &[Rgb], lum: &[f32], w: u32, h: u32, palette: &[Rgb], par
 /// A pixel whose lightness moved less than this between frames stood still.
 const STILL: f32 = 0.02;
 
-/// The print as text, `cols` characters wide.
-pub fn ascii_lines(print: &Print, cols: usize, adjust: Adjust, charset: Charset, fit: Fit) -> std::rc::Rc<Vec<String>> {
-    // Fitting samples sub-character detail: give it ~8 samples per column.
-    let w = (cols as u32 * 8).min(print.w).max(1);
-    let small = print.resize(w, rows_for(print, w));
-    let pic = Picture::new(small.w, small.h, ink_levels(&small, adjust));
-    let style = ArtStyle { fit, ..ArtStyle::new(charset) };
-    ascii::picture_art(&pic, cols, style)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +335,32 @@ mod tests {
 
     fn grey(w: u32, h: u32, lum: Vec<f32>) -> Print {
         Print::from_rgb(w, h, lum.into_iter().map(|l| [l; 3]).collect())
+    }
+
+    #[test]
+    fn levels_stretch_the_photos_range() {
+        // A dim picture: 0.2..0.5.
+        let dim = grey(100, 1, (0..100).map(|i| 0.2 + 0.3 * i as f32 / 99.).collect());
+        let (lo, hi) = levels(&dim);
+        assert!((lo - 0.2).abs() < 0.02 && (hi - 0.5).abs() < 0.02, "{lo} {hi}");
+        let r = Recipe::default();
+        let a = Adjust::new(&r, true, &dim);
+        let ink = ink_levels(&dim, a);
+        assert!(ink[0] < 5 && ink[99] > 250, "stretched to the full range");
+        // A black point clears the dark end to paper.
+        let a = Adjust::new(&Recipe { black: 0.3, ..r.clone() }, true, &dim);
+        assert_eq!(ink_levels(&dim, a)[20], 0);
+        // Off: unchanged.
+        let a = Adjust::new(&Recipe { auto_levels: false, ..r }, true, &dim);
+        assert!(ink_levels(&dim, a)[0] > 40);
+    }
+
+    #[test]
+    fn crops() {
+        let p = ramp(10, 4);
+        let c = p.crop([0.5, 0.25, 0.5, 0.5]);
+        assert_eq!((c.w, c.h), (5, 2));
+        assert_eq!(c.rgb[0], p.rgb[10 + 5]);
     }
 
     fn ramp(w: u32, h: u32) -> Print {
@@ -404,7 +472,7 @@ mod tests {
     fn reference_cutout_is_one_ink_on_clean_paper() {
         let r = bundled("Cut-out");
         let colors = r.palette_colors(PAPER, INK);
-        let art = develop_recipe(&figure(), &r, Adjust { brightness: r.brightness, contrast: r.contrast, gamma: r.gamma, invert: r.invert, light_ink: false }, colors.clone(), None, None);
+        let art = develop_recipe(&figure(), &r, Adjust { brightness: r.brightness, contrast: r.contrast, gamma: r.gamma, invert: r.invert, light_ink: false, black: 0., white: 1. }, colors.clone(), None, None);
         let paper = render::paper_index(&colors, r.paper) as u8;
         let (w, h) = (art.w as usize, art.h as usize);
         // The backdrop is bare paper all round: the corners and edges.
@@ -423,7 +491,7 @@ mod tests {
     fn reference_lattice_is_a_solid_figure_on_a_regular_grid() {
         let r = bundled("Lattice");
         let colors = r.palette_colors(PAPER, INK);
-        let adjust = Adjust { brightness: r.brightness, contrast: r.contrast, gamma: r.gamma, invert: r.invert, light_ink: true };
+        let adjust = Adjust { brightness: r.brightness, contrast: r.contrast, gamma: r.gamma, invert: r.invert, light_ink: true, black: 0., white: 1. };
         let art = develop_recipe(&figure(), &r, adjust, colors.clone(), None, None);
         let (w, h) = (art.w as usize, art.h as usize);
         // The backdrop is a regular lattice: it repeats every four pixels,
@@ -446,13 +514,6 @@ mod tests {
         let lit = |x: usize, y: usize| px[(y * pw as usize + x) * 4] > 128;
         let (cx, cy) = (lx * 6, row * 6);
         assert!(lit(cx + 3, cy + 3) && !lit(cx, cy), "a dot with a gap around it");
-    }
-
-    #[test]
-    fn ascii_has_the_width_asked_for() {
-        let lines = ascii_lines(&sample(), 60, Adjust::default(), Charset::Classic, Fit::Tone);
-        assert!(lines.len() > 5);
-        assert!(lines.iter().all(|l| l.chars().count() == 60));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-darkroom"
-version = "1.1.0"
+version = "1.2.0"
 description = "A Ferrite dither and text-art studio: photos, GIFs and video into pixel art, braille or ASCII, in twenty-nine algorithms and any palette."
 authors = ["Ryan Wetzstein"]
 license = "Apache-2.0"
@@ -20,6 +20,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Exact-palette GIF and APNG encoding (image's own GIF encoder requantises).
 gif = "0.14"
 png = "0.18"
+ab_glyph = "0.2.32"
 
 # gpui is sluggish unoptimised; optimise dependencies even in dev builds.
 [profile.dev.package."*"]

@@ -4,6 +4,46 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-10-07
+
+An overhaul of ASCII mode, from going through every glyph mode on a test
+picture.
+
+### Added
+
+- Fonts for text art, all bundled: IBM VGA, VT323, JetBrains Mono, IBM Plex
+  Mono, Cascadia Mono and Fira Mono. Characters are fitted to the chosen
+  font's real glyphs, and HTML and SVG exports name it.
+- Plain ASCII, a new character set and the default: printable ASCII only,
+  so the text pastes anywhere. "Best character" is now "Every glyph".
+- Smooth gradients (`diffuse`): each character's tone error spreads to its
+  neighbours, so tone sets like Classic no longer band. On by default for
+  the short tone sets.
+- Levels: auto levels (on by default) stretch the photo's own range, and a
+  black point and white point clear a dark or light background to paper.
+  They work in dither mode too.
+- Masks in ASCII mode; the background is left as blank paper.
+- Frames: 16:9, 16:10, 21:9, 32:9, 4:3, 1:1, 4:5 and 9:16, filled (the photo
+  cropped to the shape before developing, so a 4K export is exactly
+  3840 × 2160) or fitted (padded with paper). `--frame` on the command
+  line. A painted mask moves with the crop.
+- Braille dot size.
+- Compare and Mask views in ASCII mode.
+- Recipes report values Darkroom doesn't recognise (a toast in the app, a
+  line on stderr from the command line) instead of ignoring them.
+
+### Changed
+
+- Text-art characters are drawn anti-aliased at any size, so exports that
+  aren't a whole multiple of the font have even strokes.
+- The ASCII width goes to 240 characters (the recipe limit).
+- Character set names in recipes are read in any case (`Classic`).
+
+### Fixed
+
+- From the command line, an ASCII recipe's `.png` was a dithered picture,
+  not the text art.
+
 ## [1.1.0] - 2026-10-07
 
 ### Added
@@ -182,6 +222,7 @@ The first release.
 - The shared look from Lodestone (`FERRITE_*`) when launched from it.
 - The pixel-art logo as the Windows executable, window and taskbar icon.
 
+[1.2.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.0
 [1.1.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.0.0
 [0.1.1]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v0.1.1

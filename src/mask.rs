@@ -125,6 +125,26 @@ impl Paint {
         out
     }
 
+    /// The painting moved from one crop of the photo to another (`[x, y,
+    /// w, h]`, 0..1 of the whole photo), at `w`×`h`. Where the old crop
+    /// didn't reach is unpainted.
+    pub fn reframe(&self, from: [f32; 4], to: [f32; 4], w: u32, h: u32) -> Paint {
+        let mut v = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                // Here on the whole photo, then on the old crop.
+                let (u, t) = (to[0] + (x as f32 + 0.5) / w as f32 * to[2], to[1] + (y as f32 + 0.5) / h as f32 * to[3]);
+                let (ou, ot) = ((u - from[0]) / from[2], (t - from[1]) / from[3]);
+                v.push(if (0. ..1.).contains(&ou) && (0. ..1.).contains(&ot) {
+                    self.v[((ot * self.h as f32) as u32).min(self.h - 1) as usize * self.w as usize + ((ou * self.w as f32) as u32).min(self.w - 1) as usize]
+                } else {
+                    0.
+                });
+            }
+        }
+        Paint { w, h, v }
+    }
+
     /// From a greyscale picture: light is subject.
     pub fn from_image(img: &image::GrayImage, w: u32, h: u32) -> Paint {
         let src = Paint { w: img.width().max(1), h: img.height().max(1), v: img.pixels().map(|p| p.0[0] as f32 / 255.).collect() };
@@ -275,6 +295,18 @@ mod tests {
 
     fn spec(kind: Kind) -> Spec {
         Spec { kind, feather: 0., ..Spec::default() }
+    }
+
+    #[test]
+    fn reframing_keeps_the_painting_in_place() {
+        // Paint the right half of a 10×10 photo, then crop to its right half.
+        let mut p = Paint::blank(10, 10);
+        p.v.iter_mut().enumerate().filter(|(i, _)| i % 10 >= 5).for_each(|(_, v)| *v = 1.);
+        let r = p.reframe([0., 0., 1., 1.], [0.5, 0., 0.5, 1.], 5, 10);
+        assert!(r.v.iter().all(|&v| v == 1.));
+        // And back: the left half was never painted.
+        let back = r.reframe([0.5, 0., 0.5, 1.], [0., 0., 1., 1.], 10, 10);
+        assert_eq!(back.v, p.v);
     }
 
     #[test]

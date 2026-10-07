@@ -17,8 +17,30 @@ covered by the Apache License above; each keeps its own license.
     https://github.com/JetBrains/JetBrainsMono
     Licensed under the SIL Open Font License, Version 1.1.
 
-src/glyphs.rs holds 8x16 bitmaps rendered from PxPlus IBM VGA 8x16 (copied
-from ferrite-design) and so is under CC BY-SA 4.0 like the font.
+Darkroom also bundles these fonts in assets/fonts/ for drawing text art.
+They are compiled into the binary; each keeps its own license, and the
+license texts are beside them and in every release archive's licenses/.
 
-The license texts ship with ferrite-design in assets/fonts/ and are
+  PxPlus IBM VGA 8x16 (as above), CC BY-SA 4.0.
+
+  JetBrains Mono (as above), SIL Open Font License 1.1.
+
+  VT323
+    (c) 2011 The VT323 Project Authors — https://github.com/phoikoi/VT323
+    Licensed under the SIL Open Font License, Version 1.1.
+
+  IBM Plex Mono
+    (c) 2017 IBM Corp. — https://github.com/IBM/plex
+    Licensed under the SIL Open Font License, Version 1.1.
+
+  Cascadia Mono
+    (c) 2019 Microsoft Corporation — https://github.com/microsoft/cascadia-code
+    Licensed under the SIL Open Font License, Version 1.1.
+
+  Fira Mono
+    (c) 2012-2013 The Mozilla Corporation and Telefonica S.A. —
+    https://github.com/mozilla/Fira
+    Licensed under the SIL Open Font License, Version 1.1.
+
+ferrite-design's own font license texts are in its assets/fonts/ and are
 included in every Darkroom release archive.
