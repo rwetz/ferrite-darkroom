@@ -4,6 +4,15 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-10-07
+
+### Fixed
+
+- An animation in ASCII mode exports as an animated GIF (<kbd>Ctrl</kbd>+<kbd>E</kbd>),
+  APNG or MP4 of the text art, not only as an HTML film; at any export size
+  and frame. On the command line, an ASCII recipe's `.gif`, `.png` or `.mp4`
+  of an animation is the text art too.
+
 ## [1.2.0] - 2026-10-07
 
 An overhaul of ASCII mode, from going through every glyph mode on a test
@@ -222,6 +231,7 @@ The first release.
 - The shared look from Lodestone (`FERRITE_*`) when launched from it.
 - The pixel-art logo as the Windows executable, window and taskbar icon.
 
+[1.2.1]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.1
 [1.2.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.2.0
 [1.1.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.1.0
 [1.0.0]: https://github.com/rwetz/ferrite-darkroom/releases/tag/v1.0.0

@@ -215,19 +215,55 @@ pub fn gif(arts: &[Art], delays: &[u32], to: Out, scale: u32, look: Look) -> Res
 
 /// An animated PNG: full colour and alpha, any palette size.
 pub fn apng(arts: &[Art], delays: &[u32], to: Out, scale: u32, look: Look) -> Result<Vec<u8>, String> {
-    let first = arts.first().ok_or("nothing to export")?;
-    let (w, h, _) = draw(first, to, scale, look);
+    apng_rgba(arts.len(), delays, |i| draw(&arts[i], to, scale, look))
+}
+
+/// `n` frames of any picture (`frame(i)` gives each as RGBA, made one at a
+/// time so a long animation at 4K isn't all in memory) as an animated GIF,
+/// looping forever. Frames with more than 256 colours (anti-aliased text,
+/// photo colours) are quantised, each with its own palette.
+pub fn gif_rgba(n: usize, delays: &[u32], frame: impl Fn(usize) -> (u32, u32, Vec<u8>)) -> Result<Vec<u8>, String> {
+    if n == 0 {
+        return Err("nothing to export".into());
+    }
+    let (w, h, first) = frame(0);
+    if w > u16::MAX as u32 || h > u16::MAX as u32 {
+        return Err("too big for a GIF; use a smaller size".into());
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = gif::Encoder::new(&mut out, w as u16, h as u16, &[]).map_err(|e| e.to_string())?;
+        enc.set_repeat(gif::Repeat::Infinite).map_err(|e| e.to_string())?;
+        let mut px = Some(first);
+        for i in 0..n {
+            let mut rgba = px.take().unwrap_or_else(|| frame(i).2);
+            let mut f = gif::Frame::from_rgba_speed(w as u16, h as u16, &mut rgba, 10);
+            f.delay = ((delays.get(i).copied().unwrap_or(100) + 5) / 10).clamp(2, u16::MAX as u32) as u16;
+            f.dispose = gif::DisposalMethod::Background;
+            enc.write_frame(&f).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(out)
+}
+
+/// `n` frames of any picture as an animated PNG (see [`gif_rgba`]).
+pub fn apng_rgba(n: usize, delays: &[u32], frame: impl Fn(usize) -> (u32, u32, Vec<u8>)) -> Result<Vec<u8>, String> {
+    if n == 0 {
+        return Err("nothing to export".into());
+    }
+    let (w, h, first) = frame(0);
     let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, w, h);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
-        enc.set_animated(arts.len() as u32, 0).map_err(|e| e.to_string())?;
+        enc.set_animated(n as u32, 0).map_err(|e| e.to_string())?;
         let mut writer = enc.write_header().map_err(|e| e.to_string())?;
-        for (art, &delay) in arts.iter().zip(delays) {
-            writer.set_frame_delay(delay.min(u16::MAX as u32) as u16, 1000).map_err(|e| e.to_string())?;
-            let (_, _, px) = draw(art, to, scale, look);
-            writer.write_image_data(&px).map_err(|e| e.to_string())?;
+        let mut px = Some(first);
+        for i in 0..n {
+            writer.set_frame_delay(delays.get(i).copied().unwrap_or(100).min(u16::MAX as u32) as u16, 1000).map_err(|e| e.to_string())?;
+            let rgba = px.take().unwrap_or_else(|| frame(i).2);
+            writer.write_image_data(&rgba).map_err(|e| e.to_string())?;
         }
         writer.finish().map_err(|e| e.to_string())?;
     }
@@ -307,7 +343,12 @@ fn load_video(path: &Path) -> Result<Clip, String> {
 /// An MP4 (H.264) through ffmpeg, at the average frame rate, pixels kept
 /// sharp (nearest-neighbour) and padded to even sizes as H.264 needs.
 pub fn mp4(arts: &[Art], delays: &[u32], to: Out, scale: u32, look: Look) -> Result<Vec<u8>, String> {
-    if arts.is_empty() {
+    mp4_rgba(arts.len(), delays, |i| draw(&arts[i], to, scale, look))
+}
+
+/// `n` frames of any picture as an MP4 (see [`gif_rgba`]).
+pub fn mp4_rgba(n: usize, delays: &[u32], frame: impl Fn(usize) -> (u32, u32, Vec<u8>)) -> Result<Vec<u8>, String> {
+    if n == 0 {
         return Err("nothing to export".into());
     }
     let average = delays.iter().map(|&d| d as f32).sum::<f32>() / delays.len().max(1) as f32;
@@ -324,9 +365,9 @@ pub fn mp4(arts: &[Art], delays: &[u32], to: Out, scale: u32, look: Look) -> Res
         .map_err(|_| NO_FFMPEG.to_string())?;
     {
         let stdin = child.stdin.as_mut().ok_or("couldn't talk to ffmpeg")?;
-        for art in arts {
+        for i in 0..n {
             let png = {
-                let (w, h, px) = draw(art, to, scale, look);
+                let (w, h, px) = frame(i);
                 crate::export::encode(w, h, px, Format::Png, [1.; 3])?
             };
             stdin.write_all(&png).map_err(|e| format!("ffmpeg stopped reading: {e}"))?;

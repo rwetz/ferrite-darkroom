@@ -80,7 +80,8 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   Export plain text, ANSI (24-bit colour, `cat` it in a terminal), HTML,
   or a picture in any export format (characters drawn in the chosen font,
   with even, anti-aliased strokes at any size); an animation exports as an
-  *ASCII film*, an HTML page that plays itself. Braille dots have a size.
+  animated GIF, APNG or MP4 of the text art, or as an *ASCII film*, an HTML
+  page that plays itself. Braille dots have a size.
 - **Tone.** *Auto levels* stretches the photo's own darkest to lightest;
   a *black point* clears a dark background to paper (and a white point
   the light end); then brightness, contrast, gamma and invert.

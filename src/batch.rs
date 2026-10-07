@@ -48,7 +48,8 @@ impl Job {
     }
 
     /// Develop `input` into `output`. `.gif` makes a GIF (a still makes a
-    /// one-frame GIF), `.png` a PNG (an APNG for an animation), `.jpg`,
+    /// one-frame GIF), `.png` a PNG (an APNG for an animation), `.mp4` a
+    /// video; with an ASCII recipe these are of the text art. `.jpg`,
     /// `.webp`, `.bmp` and `.tif` a still of the first frame; `.txt`,
     /// `.ans`, `.html` and `.svg` make text art of the first frame (an
     /// animation's `.html` is a film that plays every frame).
@@ -75,6 +76,17 @@ impl Job {
                         let art = sequence::develop_all(&clip.frames[..1], r, adjust, &colors, paint).remove(0);
                         render::still(&art, size, frame, r.scale, format, r.look())?
                     }
+                }
+            }
+            // An animation (or a GIF of a still) as moving text art.
+            "gif" | "png" | "apng" | "mp4" if r.mode == crate::recipe::Mode::Ascii => {
+                let frames: Vec<_> = clip.frames.iter().map(|f| textart::make(&f.print, r, adjust, &colors, self.paper, self.ink, paint)).collect();
+                let delays = sequence::delays(&clip.frames, r.speed);
+                let draw = |i: usize| frames[i].rgba(size, frame, r.scale);
+                match ext.as_str() {
+                    "gif" => sequence::gif_rgba(frames.len(), &delays, draw)?,
+                    "mp4" => sequence::mp4_rgba(frames.len(), &delays, draw)?,
+                    _ => sequence::apng_rgba(frames.len(), &delays, draw)?,
                 }
             }
             "gif" | "png" | "apng" | "mp4" => {
@@ -181,6 +193,29 @@ mod tests {
             let img = image::open(dir.join(format!("out.{ext}"))).unwrap();
             assert_eq!(img.width(), 1920, "{ext}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ascii_animations_move() {
+        let dir = scratch("ascii-anim");
+        let input = dir.join("in.gif");
+        let frames: Vec<image::Frame> = (0..3)
+            .map(|i| image::Frame::from_parts(image::RgbaImage::from_fn(40, 20, |x, _| {
+                let v = if (x / 8 + i) % 2 == 0 { 0 } else { 255 };
+                image::Rgba([v, v, v, 255])
+            }), 0, 0, image::Delay::from_numer_denom_ms(100, 1)))
+            .collect();
+        image::codecs::gif::GifEncoder::new(std::fs::File::create(&input).unwrap()).encode_frames(frames).unwrap();
+        let job = Job { recipe: Recipe { mode: Mode::Ascii, ascii_cols: 20, ..job().recipe }, size: Size::Long(320), ..job() };
+        job.develop_file(&input, &dir.join("out.gif")).unwrap();
+        let gif = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(std::fs::File::open(dir.join("out.gif")).unwrap())).unwrap();
+        let frames = image::AnimationDecoder::into_frames(gif).collect_frames().unwrap();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].buffer().width(), 320);
+        assert!(frames[0].buffer() != frames[1].buffer(), "the text art moves");
+        job.develop_file(&input, &dir.join("out.png")).unwrap();
+        assert!(png::Decoder::new(std::io::BufReader::new(std::fs::File::open(dir.join("out.png")).unwrap())).read_info().unwrap().info().animation_control.is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
