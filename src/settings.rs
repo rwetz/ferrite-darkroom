@@ -23,7 +23,7 @@ impl Default for Settings {
 impl Settings {
     pub fn parse(src: &str) -> Self {
         let mut s = Self::default();
-        for (k, value) in src.lines().filter_map(recipe::parse_line) {
+        for (k, value) in src.trim_start_matches('\u{feff}').lines().filter_map(recipe::parse_line) {
             if s.recipe.apply(&k, &value) {
                 continue;
             }

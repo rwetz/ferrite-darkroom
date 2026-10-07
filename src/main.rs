@@ -13,28 +13,143 @@
 mod engine;
 mod palettes;
 mod recipe;
+mod render;
 mod settings;
 mod studio;
 
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ferrite_design::ascii::{Charset, Fit};
 use gpui::{
-    App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Corners, Entity, ExternalPaths, IntoElement, KeyBinding,
-    PathPromptOptions, Render, RenderImage, Rgba, Subscription, Window, canvas, div, point, px, size,
+    App, AppContext as _, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, Corners, Entity, ExternalPaths, Hsla, IntoElement,
+    KeyBinding, PathPromptOptions, Pixels, Render, RenderImage, Rgba, Subscription, Window, canvas, div, fill, point, px, size,
 };
 use ferrite_design::prelude::*;
 
 use engine::{Algo, Rgb, Space};
 use recipe::{Mode, Recipe};
+use render::{Paper, Shape};
 use settings::Settings;
 use studio::{Adjust, Art, Print};
 
 const APPEARANCES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
 const SCALES: [u32; 4] = [1, 2, 4, 8];
 const SIDEBAR: f32 = 360.;
+/// Contact-sheet thumbnails: art width, and the narrowest a tile gets.
+const THUMB_COLS: u32 = 96;
+const TILE_MIN: f32 = 180.;
+/// A tile's padding and border, both sides, and the gap between tiles.
+const TILE_FRAME: f32 = 10.;
+const TILE_GAP: f32 = 8.;
+/// Edits closer together than this (a slider drag) undo as one.
+const UNDO_MERGE: Duration = Duration::from_millis(600);
+const UNDO_DEPTH: usize = 200;
+
+/// What the print panel shows.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Print,
+    /// The photo left of a split, the art right of it.
+    Compare,
+    /// One thumbnail per algorithm or palette; click to adopt.
+    Sheet,
+}
+
+#[derive(Clone, Copy, PartialEq, Hash)]
+enum SheetKind {
+    Algorithms,
+    Palettes,
+}
+
+/// GPU textures the view draws, keyed by what they show. Every frame marks
+/// what it uses; the rest are freed from the atlas at the frame's end.
+#[derive(Default)]
+struct Textures {
+    map: HashMap<u64, (Arc<RenderImage>, bool)>,
+}
+
+impl Textures {
+    fn begin(&mut self) {
+        for entry in self.map.values_mut() {
+            entry.1 = false;
+        }
+    }
+
+    fn get(&mut self, key: u64, make: impl FnOnce() -> (u32, u32, Vec<u8>)) -> Arc<RenderImage> {
+        let entry = self.map.entry(key).or_insert_with(|| {
+            let (w, h, bgra) = make();
+            let buffer = image::RgbaImage::from_raw(w, h, bgra).expect("texture size matches its pixels");
+            (Arc::new(RenderImage::new([image::Frame::new(buffer)])), false)
+        });
+        entry.1 = true;
+        entry.0.clone()
+    }
+
+    fn end(&mut self, window: &mut Window) {
+        let stale: Vec<u64> = self.map.iter().filter(|(_, (_, used))| !used).map(|(k, _)| *k).collect();
+        for key in stale {
+            if let Some((image, _)) = self.map.remove(&key) {
+                let _ = window.drop_image(image);
+            }
+        }
+    }
+}
+
+fn key_of(value: impl Hash) -> u64 {
+    let mut h = DefaultHasher::new();
+    value.hash(&mut h);
+    h.finish()
+}
+
+/// `dw`×`dh` device pixels placed at `bounds`' origin, snapped to the
+/// device grid so texels land 1:1 on screen pixels.
+fn snapped(bounds: Bounds<Pixels>, dw: u32, dh: u32, sf: f32) -> Bounds<Pixels> {
+    let origin = point(px((f32::from(bounds.origin.x) * sf).round() / sf), px((f32::from(bounds.origin.y) * sf).round() / sf));
+    Bounds::new(origin, size(px(dw as f32 / sf), px(dh as f32 / sf)))
+}
+
+/// An element showing a texture pixel for pixel.
+fn texture(image: Arc<RenderImage>, dw: u32, dh: u32, sf: f32) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds: Bounds<Pixels>, _, window: &mut Window, _| {
+            let target = snapped(bounds, dw, dh, window.scale_factor());
+            let _ = window.paint_image(target, target, Corners::default(), image, 0, false);
+        },
+    )
+    .w(px(dw as f32 / sf))
+    .h(px(dh as f32 / sf))
+}
+
+/// Before left of `split` (0..1), after right of it, a rule between.
+fn compare(before: Arc<RenderImage>, after: Arc<RenderImage>, dw: u32, dh: u32, sf: f32, split: f32, rule: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds: Bounds<Pixels>, _, window: &mut Window, _| {
+            let sf = window.scale_factor();
+            let target = snapped(bounds, dw, dh, sf);
+            // Split on a device pixel, so neither side is resampled.
+            let cut = (dw as f32 * split).round() / sf;
+            let left = Bounds::new(target.origin, size(px(cut), target.size.height));
+            let right = Bounds::new(point(target.origin.x + px(cut), target.origin.y), size(target.size.width - px(cut), target.size.height));
+            window.with_content_mask(Some(ContentMask { bounds: left }), |window| {
+                let _ = window.paint_image(target, target, Corners::default(), before, 0, false);
+            });
+            window.with_content_mask(Some(ContentMask { bounds: right }), |window| {
+                let _ = window.paint_image(target, target, Corners::default(), after, 0, false);
+            });
+            let line = Bounds::new(point(target.origin.x + px(cut), target.origin.y), size(px(2. / sf), target.size.height));
+            window.paint_quad(fill(line, rule));
+        },
+    )
+    .w(px(dw as f32 / sf))
+    .h(px(dh as f32 / sf))
+}
 
 /// What's on the easel.
 struct Photo {
@@ -45,7 +160,7 @@ struct Photo {
 }
 
 /// Everything a dither depends on, compared bit for bit to skip redevelops.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Hash)]
 struct DevKey {
     cols: u32,
     adjust: [u32; 3],
@@ -59,12 +174,17 @@ struct DevKey {
     palette: Vec<[u32; 3]>,
 }
 
-/// The developed art, and the texture the preview last uploaded for it.
+/// The developed art and what it was developed with.
 struct Developed {
     key: DevKey,
     art: Rc<Art>,
-    /// `(cell, image)`; rebuilt when the cell size changes.
-    shown: Option<(u32, Arc<RenderImage>)>,
+}
+
+/// A contact-sheet tile: its label, its art, and whether it's the current one.
+struct Tile {
+    label: &'static str,
+    art: Rc<Art>,
+    current: bool,
 }
 
 type Typeset = ((usize, [u32; 3], bool, bool, Charset, Fit), Rc<Vec<String>>);
@@ -76,8 +196,16 @@ struct Darkroom {
     /// Bumped per photo, to replay the develop effect.
     roll: u64,
     developed: Option<Developed>,
-    /// Textures replaced since the last frame, to free from the GPU atlas.
-    stale: Vec<Arc<RenderImage>>,
+    tex: Textures,
+    view: View,
+    /// Compare's split, 0..1 across the print.
+    split: f32,
+    sheet: SheetKind,
+    /// The contact sheet's tiles and the inputs they were developed from.
+    tiles: Option<(u64, Rc<Vec<Tile>>)>,
+    undo: Vec<Recipe>,
+    redo: Vec<Recipe>,
+    last_edit: Option<Instant>,
     typeset: Option<Typeset>,
     palette: Entity<CommandPalette>,
     toaster: Entity<Toaster>,
@@ -92,7 +220,14 @@ impl Darkroom {
             loading: false,
             roll: 0,
             developed: None,
-            stale: Vec::new(),
+            tex: Textures::default(),
+            view: View::Print,
+            split: 0.5,
+            sheet: SheetKind::Algorithms,
+            tiles: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
             typeset: None,
             palette: cx.new(|cx| CommandPalette::new(window, cx)),
             toaster: cx.new(|_| Toaster::new()),
@@ -133,7 +268,9 @@ impl Darkroom {
     }
 
     fn change(&mut self, f: impl FnOnce(&mut Settings), window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.settings.recipe.clone();
         f(&mut self.settings);
+        self.record(before);
         self.apply_look(window, cx);
         self.save(cx);
     }
@@ -141,8 +278,51 @@ impl Darkroom {
     /// Change only the recipe: no look to reapply, so no window needed
     /// (async results land here).
     fn set_recipe(&mut self, f: impl FnOnce(&mut Recipe), cx: &mut Context<Self>) {
+        let before = self.settings.recipe.clone();
         f(&mut self.settings.recipe);
+        self.record(before);
         self.save(cx);
+    }
+
+    // ── Undo ─────────────────────────────────────────────────────────────
+
+    /// Remember the recipe as it was before an edit. A burst of edits (a
+    /// slider drag) keeps only its first "before", so it undoes in one go.
+    fn record(&mut self, before: Recipe) {
+        if before == self.settings.recipe {
+            return;
+        }
+        let now = Instant::now();
+        let merging = self.last_edit.is_some_and(|t| now.duration_since(t) < UNDO_MERGE);
+        if !merging {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_DEPTH {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.last_edit = Some(now);
+    }
+
+    fn undo(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.undo.pop() {
+            self.redo.push(std::mem::replace(&mut self.settings.recipe, r));
+            self.last_edit = None;
+            self.save(cx);
+        }
+    }
+
+    fn redo(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.settings.recipe, r));
+            self.last_edit = None;
+            self.save(cx);
+        }
+    }
+
+    fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
+        self.view = view;
+        cx.notify();
     }
 
     fn toast(&self, t: Toast, cx: &mut Context<Self>) {
@@ -164,6 +344,18 @@ impl Darkroom {
             command("Import palette…").group("Recipe").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_palette(cx))),
             command("Paste palette").group("Recipe").icon(Icon::Copy).on_run(run(|this, _, cx| this.paste_palette(cx))),
             command("New random seed").group("Develop").icon(Icon::Refresh).on_run(run(|this, _, cx| this.reseed(cx))),
+            command("Undo").group("Edit").shortcut("Ctrl+Z").on_run(run(|this, _, cx| this.undo(cx))),
+            command("Redo").group("Edit").shortcut("Ctrl+Shift+Z").on_run(run(|this, _, cx| this.redo(cx))),
+            command("View: print").group("View").on_run(run(|this, _, cx| this.set_view(View::Print, cx))),
+            command("View: compare with the photo").group("View").on_run(run(|this, _, cx| this.set_view(View::Compare, cx))),
+            command("View: contact sheet of algorithms").group("View").on_run(run(|this, _, cx| {
+                this.sheet = SheetKind::Algorithms;
+                this.set_view(View::Sheet, cx)
+            })),
+            command("View: contact sheet of palettes").group("View").on_run(run(|this, _, cx| {
+                this.sheet = SheetKind::Palettes;
+                this.set_view(View::Sheet, cx)
+            })),
             command("Export PNG…").group("File").icon(Icon::File).shortcut("Ctrl+E").on_run(run(|this, window, cx| this.export_png(window, cx))),
             command("Export text…").group("File").icon(Icon::File).shortcut("Ctrl+Shift+E").on_run(run(|this, _, cx| this.export_text(cx))),
             command("Copy ASCII").group("File").icon(Icon::Copy).shortcut("Ctrl+Shift+C").on_run(run(|this, _, cx| this.copy_text(cx))),
@@ -439,29 +631,48 @@ impl Darkroom {
         }
         let params = s.recipe.params();
         let art = Rc::new(studio::develop(&self.photo.print, s.recipe.cols, a, colors, params));
-        if let Some(old) = self.developed.take().and_then(|d| d.shown) {
-            self.stale.push(old.1);
-        }
-        self.developed = Some(Developed { key, art: art.clone(), shown: None });
+        self.developed = Some(Developed { key, art: art.clone() });
         art
     }
 
-    /// The preview texture for the current art at `cell` device px per pixel.
-    fn shown(&mut self, cell: u32, cx: &App) -> Arc<RenderImage> {
-        let art = self.developed(cx);
-        let d = self.developed.as_mut().expect("developed above");
-        if let Some((c, image)) = &d.shown
-            && *c == cell
+    /// The contact sheet's tiles: the print through every algorithm (in the
+    /// current palette) or every palette (with the current algorithm).
+    fn tiles(&mut self, cx: &App) -> Rc<Vec<Tile>> {
+        let a = self.adjust(cx);
+        let r = self.settings.recipe.clone();
+        let (paper, ink) = self.scheme_inks(cx);
+        let current = self.palette_colors(cx);
+        let custom = self.custom().is_some();
+        let mut choices: Vec<(&'static str, Vec<Rgb>, bool)> =
+            palettes::PRESETS.iter().map(|p| (p.name, p.colors(paper, ink), !custom && p.key == r.palette)).collect();
+        if r.colors.len() >= 2 {
+            choices.push(("Custom", r.colors.clone(), custom));
+        }
+        let bits = |c: &[Rgb]| c.iter().map(|c| c.map(f32::to_bits)).collect::<Vec<_>>();
+        let inputs = key_of((self.sheet, self.roll, Self::adjust_key(a), r.flat_lines(), bits(&current), choices.iter().map(|c| bits(&c.1)).collect::<Vec<_>>()));
+        if let Some((k, tiles)) = &self.tiles
+            && *k == inputs
         {
-            return image.clone();
+            return tiles.clone();
         }
-        let (w, h, bytes) = art.bgra(cell);
-        let buffer = image::RgbaImage::from_raw(w, h, bytes).expect("bgra size matches");
-        let image = Arc::new(RenderImage::new([image::Frame::new(buffer)]));
-        if let Some((_, old)) = d.shown.replace((cell, image.clone())) {
-            self.stale.push(old);
-        }
-        image
+        let print = &self.photo.print;
+        let tiles: Vec<Tile> = match self.sheet {
+            SheetKind::Algorithms => Algo::ALL
+                .iter()
+                .map(|&algo| Tile {
+                    label: algo.name(),
+                    art: Rc::new(studio::develop(print, THUMB_COLS, a, current.clone(), engine::Params { algo, ..r.params() })),
+                    current: algo == r.algo,
+                })
+                .collect(),
+            SheetKind::Palettes => choices
+                .into_iter()
+                .map(|(label, colors, current)| Tile { label, art: Rc::new(studio::develop(print, THUMB_COLS, a, colors, r.params())), current })
+                .collect(),
+        };
+        let tiles = Rc::new(tiles);
+        self.tiles = Some((inputs, tiles.clone()));
+        tiles
     }
 
     fn typeset(&mut self, cx: &App) -> Rc<Vec<String>> {
@@ -513,7 +724,7 @@ impl Darkroom {
 
     fn export_png(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let art = self.developed(cx);
-        match art.png(self.settings.recipe.scale) {
+        match render::png(&art, self.settings.recipe.scale, self.settings.recipe.look()) {
             Ok(bytes) => {
                 let name = format!("{}-{}-{}.png", self.stem(), self.settings.recipe.algo.key(), self.settings.recipe.palette);
                 self.save_as(name, bytes, "PNG", cx);
@@ -540,32 +751,25 @@ impl Darkroom {
         let ink = hsla(if self.settings.recipe.accent_ink { p.accent } else { p.fg });
         // The room the print has: the window less the sidebar, chrome and padding.
         let view = window.viewport_size();
-        let (room_w, room_h) = (f32::from(view.width) - SIDEBAR - 72., f32::from(view.height) - 150.);
+        let (room_w, room_h) = (f32::from(view.width) - SIDEBAR - 72., f32::from(view.height) - 200.);
         match self.settings.recipe.mode {
+            Mode::Dither if self.view == View::Sheet => self.sheet_view(room_w, room_h, window, cx).into_any_element(),
             Mode::Dither => {
                 let art = self.developed(cx);
                 let (w, h) = (art.w, art.h);
                 // Whole device pixels per art pixel, so the preview is the export.
                 let sf = window.scale_factor();
                 let cell = ((room_w / w as f32).min(room_h / h as f32) * sf).floor().max(1.) as u32;
-                let image = self.shown(cell, cx);
-                for old in self.stale.drain(..) {
-                    let _ = window.drop_image(old);
-                }
+                let look = self.settings.recipe.look();
+                let dev = self.developed.as_ref().map(|d| key_of(&d.key)).unwrap_or_default();
+                let after = self.tex.get(key_of(("after", dev, cell, look.bits())), || render::bgra(&art, cell, look));
                 let (dw, dh) = (w * cell, h * cell);
-                let print = canvas(
-                    |_, _, _| {},
-                    move |bounds: Bounds<gpui::Pixels>, _, window: &mut Window, _| {
-                        // Snap to the device grid so texels land 1:1 on pixels.
-                        let sf = window.scale_factor();
-                        let origin = point(px((f32::from(bounds.origin.x) * sf).round() / sf), px((f32::from(bounds.origin.y) * sf).round() / sf));
-                        let target = Bounds::new(origin, size(px(dw as f32 / sf), px(dh as f32 / sf)));
-                        let _ = window.paint_image(target, target, Corners::default(), image, 0, false);
-                    },
-                )
-                .w(px(dw as f32 / sf))
-                .h(px(dh as f32 / sf));
-                develop(("print", self.roll), self.roll, print).into_any_element()
+                if self.view == View::Compare {
+                    let print = &self.photo.print;
+                    let before = self.tex.get(key_of(("before", self.roll, w, h, cell)), || render::before_bgra(print, w, h, cell));
+                    return compare(before, after, dw, dh, sf, self.split, hsla(p.accent)).into_any_element();
+                }
+                develop(("print", self.roll), self.roll, texture(after, dw, dh, sf)).into_any_element()
             }
             Mode::Ascii => {
                 let lines = self.typeset(cx);
@@ -585,6 +789,163 @@ impl Darkroom {
                     .into_any_element()
             }
         }
+    }
+
+    /// A grid of thumbnails, one per algorithm or palette. Click one to use it.
+    fn sheet_view(&mut self, room_w: f32, room_h: f32, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let sf = window.scale_factor();
+        let tiles = self.tiles(cx);
+        let kind = self.sheet;
+        // As many columns as fit, each tile stretched to share the width.
+        let per_row = ((room_w + TILE_GAP) / (TILE_MIN + TILE_FRAME + TILE_GAP)).floor().max(1.);
+        let tile_w = (room_w - TILE_GAP * (per_row - 1.)) / per_row - TILE_FRAME - 1.;
+        let items: Vec<_> = tiles
+            .iter()
+            .enumerate()
+            .map(|(i, tile)| {
+                let art = tile.art.clone();
+                let cell = ((tile_w * sf) / art.w as f32).floor().max(1.) as u32;
+                let image = self.tex.get(key_of(("tile", self.tiles.as_ref().map(|t| t.0), i, cell)), || render::bgra(&art, cell, render::Look::default()));
+                let border = if tile.current { p.accent } else { p.line };
+                div()
+                    .id(("tile", i))
+                    .w(px(tile_w + TILE_FRAME))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .p_1()
+                    .border_1()
+                    .border_color(hsla(border))
+                    .hover(|style| style.bg(hsla(p.raised)))
+                    .cursor_pointer()
+                    .child(texture(image, art.w * cell, art.h * cell, sf))
+                    .child(div().body(text::SM).text_color(hsla(if tile.current { p.accent } else { p.fg_dim })).child(tile.label))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_recipe(
+                            |r| match kind {
+                                SheetKind::Algorithms => r.algo = Algo::ALL[i],
+                                SheetKind::Palettes => match palettes::PRESETS.get(i) {
+                                    Some(preset) => r.palette = preset.key.into(),
+                                    None => r.palette = palettes::CUSTOM.into(),
+                                },
+                            },
+                            cx,
+                        );
+                        this.set_view(View::Print, cx);
+                    }))
+            })
+            .collect();
+        div()
+            .id("sheet-scroll")
+            .w(px(room_w))
+            .h(px(room_h))
+            .overflow_y_scroll()
+            .child(div().flex().flex_row().flex_wrap().gap(px(TILE_GAP)).children(items))
+    }
+
+    /// The row over the print: which view, and that view's controls.
+    fn view_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let views = [View::Print, View::Compare, View::Sheet];
+        let mut bar = div().flex().flex_row().items_center().gap_4().child(
+            segmented("view-seg")
+                .option("Print")
+                .option("Compare")
+                .option("Contact sheet")
+                .selected(views.iter().position(|v| *v == self.view).unwrap_or(0))
+                .on_select(cx.listener(move |this, i: &usize, _, cx| this.set_view(views[*i], cx))),
+        );
+        match self.view {
+            View::Compare => {
+                bar = bar.child(
+                    slider("split-slider")
+                        .range(0., 1.)
+                        .step(0.01)
+                        .value(self.split)
+                        .width(px(200.))
+                        .format(|v| format!("photo {:.0}%", v * 100.).into())
+                        .on_change(cx.listener(|this, v: &f32, _, cx| {
+                            this.split = *v;
+                            cx.notify();
+                        })),
+                )
+            }
+            View::Sheet => {
+                bar = bar.child(
+                    segmented("sheet-seg")
+                        .option("Algorithms")
+                        .option("Palettes")
+                        .selected(if self.sheet == SheetKind::Palettes { 1 } else { 0 })
+                        .on_select(cx.listener(|this, i: &usize, _, cx| {
+                            this.sheet = if *i == 1 { SheetKind::Palettes } else { SheetKind::Algorithms };
+                            cx.notify();
+                        })),
+                )
+            }
+            View::Print => {}
+        }
+        bar
+    }
+
+    /// How each pixel is drawn.
+    fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let r = &self.settings.recipe;
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                field("shape", "Shape")
+                    .hint("Shapes show when a pixel is 3 px or more: in the preview, and in 4× and 8× PNGs")
+                    .stacked()
+                    .child(
+                        select("shape-select")
+                            .options(Shape::ALL.iter().map(|sh| sh.name()))
+                            .selected(Shape::ALL.iter().position(|sh| *sh == r.shape))
+                            .width(px(220.))
+                            .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.shape = Shape::ALL[*i], cx))),
+                    ),
+            )
+            .child(field("gutter", "Gutter").stacked().child(
+                slider("gutter-slider")
+                    .range(0., 0.9)
+                    .step(0.05)
+                    .value(r.gutter)
+                    .width(px(220.))
+                    .format(|v| format!("{:.0}%", v * 100.).into())
+                    .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.gutter = *v, cx))),
+            ))
+            .child(
+                switch("modulate")
+                    .label("Size by tone")
+                    .checked(r.modulate)
+                    .on_change(cx.listener(|this, on: &bool, _, cx| this.set_recipe(|r| r.modulate = *on, cx))),
+            )
+            .child(
+                field("paper-kind", "Paper").hint("Which palette colour the shapes sit on").stacked().child(
+                    Paper::ALL
+                        .iter()
+                        .fold(segmented("paper-seg"), |seg, pa| seg.option(pa.name()))
+                        .selected(Paper::ALL.iter().position(|pa| *pa == r.paper).unwrap_or(0))
+                        .on_select(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.paper = Paper::ALL[*i], cx))),
+                ),
+            )
+            .child(
+                switch("transparent")
+                    .label("Transparent paper")
+                    .checked(r.transparent)
+                    .on_change(cx.listener(|this, on: &bool, _, cx| this.set_recipe(|r| r.transparent = *on, cx))),
+            )
+            .child(field("lattice", "Lattice").hint("Dots over the bare paper, in the colour furthest from it").stacked().child(
+                slider("lattice-slider")
+                    .range(0., 1.)
+                    .step(0.05)
+                    .value(r.lattice)
+                    .width(px(220.))
+                    .format(|v| if v <= 0. { "off".into() } else { format!("{:.0}%", v * 100.).into() })
+                    .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.lattice = *v, cx))),
+            ))
     }
 
     /// The preset row, the colours it gives, and how they're matched.
@@ -814,6 +1175,7 @@ impl Darkroom {
                             .on_change(cx.listener(|this, v: &f32, window, cx| this.change(|s| s.recipe.gamma = *v, window, cx))),
                     ))
                     .child(switch("invert").label("Invert").checked(s.recipe.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.invert = *on, window, cx))))
+                    .when(mode == Mode::Dither, |el| el.child(rule(Some("render"), window, cx)).child(self.render_controls(cx)))
                     .child(rule(Some("palette"), window, cx))
                     .when(mode == Mode::Dither, |el| el.child(self.palette_picker(cx)))
                     .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(
@@ -860,9 +1222,12 @@ impl Render for Darkroom {
             Mode::Dither => format!("{} · {}×{} px", self.photo.name, self.settings.recipe.cols, studio::rows_for(&self.photo.print, self.settings.recipe.cols)),
             Mode::Ascii => format!("{} · {} ch", self.photo.name, self.settings.recipe.ascii_cols),
         };
+        self.tex.begin();
         let preview = self.preview(window, cx);
+        self.tex.end(window);
+        let view_bar = (self.settings.recipe.mode == Mode::Dither).then(|| self.view_bar(cx));
         let drop_hint = hsla(p.raised);
-        let print = panel("Print").meta(size_meta).flex_1().min_w_0().min_h_0().child(
+        let print = panel("Print").meta(size_meta).flex_1().min_w_0().min_h_0().children(view_bar.map(|bar| div().px_2().pb_2().child(bar))).child(
             div()
                 .id("easel")
                 .flex()
@@ -880,7 +1245,7 @@ impl Render for Darkroom {
                     }
                 }))
                 .child(if self.loading { spinner("loading").into_any_element() } else { preview })
-                .when(self.photo.path.is_none(), |el| {
+                .when(self.photo.path.is_none() && self.view != View::Sheet, |el| {
                     el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("A sample print. Drop a photo here, or open one with Ctrl+O."))
                 }),
         );
@@ -901,6 +1266,8 @@ impl Render for Darkroom {
                 .on_action(cx.listener(|this, _: &Open, _, cx| this.open(cx)))
                 .on_action(cx.listener(|this, _: &OpenRecipe, _, cx| this.open_recipe(cx)))
                 .on_action(cx.listener(|this, _: &SaveRecipe, _, cx| this.save_recipe(cx)))
+                .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
+                .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
                 .on_action(cx.listener(|this, _: &ExportPng, window, cx| this.export_png(window, cx)))
                 .on_action(cx.listener(|this, _: &ExportText, _, cx| this.export_text(cx)))
                 .on_action(cx.listener(|this, _: &CopyText, _, cx| this.copy_text(cx)))
@@ -923,7 +1290,7 @@ impl Render for Darkroom {
     }
 }
 
-gpui::actions!(darkroom, [Open, OpenRecipe, SaveRecipe, ExportPng, ExportText, CopyText, Invert]);
+gpui::actions!(darkroom, [Open, OpenRecipe, SaveRecipe, ExportPng, ExportText, CopyText, Invert, Undo, Redo]);
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
@@ -933,6 +1300,9 @@ fn main() {
             KeyBinding::new("ctrl-o", Open, None),
             KeyBinding::new("ctrl-shift-o", OpenRecipe, None),
             KeyBinding::new("ctrl-s", SaveRecipe, None),
+            KeyBinding::new("ctrl-z", Undo, None),
+            KeyBinding::new("ctrl-shift-z", Redo, None),
+            KeyBinding::new("ctrl-y", Redo, None),
             KeyBinding::new("ctrl-e", ExportPng, None),
             KeyBinding::new("ctrl-shift-e", ExportText, None),
             KeyBinding::new("ctrl-shift-c", CopyText, None),

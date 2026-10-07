@@ -6,6 +6,26 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
+The 0.3 milestone in [the roadmap](docs/ROADMAP.md): render and compare.
+
+### Added
+
+- Pixels as shapes: square, circle, diamond or plus, with a gutter, size by
+  tone, a choice of paper colour, transparent paper (PNG alpha), and a dot
+  lattice over the bare paper.
+- Compare: the photo and the art either side of an adjustable split.
+- Contact sheet: the print through all twenty algorithms, or every palette;
+  click a tile to use it.
+- Undo and redo for every recipe change (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y).
+- A fifth example recipe, `recipes/dots.toml`.
+
+### Fixed
+
+- A recipe or settings file saved with a UTF-8 byte-order mark (Notepad,
+  PowerShell) lost its first line.
+
+## 0.2 (merged, not yet released)
+
 The 0.2 milestone in [the roadmap](docs/ROADMAP.md): algorithms, palettes
 and recipes.
 

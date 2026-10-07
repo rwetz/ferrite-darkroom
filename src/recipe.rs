@@ -12,6 +12,7 @@ use ferrite_design::ascii::{Charset, Fit};
 
 use crate::engine::{Algo, Params, Rgb, Space};
 use crate::palettes;
+use crate::render::{Look, Paper, Shape};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -40,6 +41,13 @@ pub struct Recipe {
     pub cols: u32,
     /// Each pixel's size in the exported PNG.
     pub scale: u32,
+    /// How each pixel is drawn.
+    pub shape: Shape,
+    pub gutter: f32,
+    pub modulate: bool,
+    pub paper: Paper,
+    pub transparent: bool,
+    pub lattice: f32,
     pub brightness: f32,
     pub contrast: f32,
     pub gamma: f32,
@@ -66,6 +74,12 @@ impl Default for Recipe {
             seed: 1,
             cols: 160,
             scale: 4,
+            shape: Shape::Square,
+            gutter: 0.,
+            modulate: false,
+            paper: Paper::First,
+            transparent: false,
+            lattice: 0.,
             brightness: 0.,
             contrast: 1.,
             gamma: 1.,
@@ -213,6 +227,12 @@ impl Recipe {
             "seed" => self.seed = v.parse().unwrap_or(self.seed),
             "cols" => self.cols = u(16, 640, self.cols),
             "scale" => self.scale = u(1, 16, self.scale),
+            "shape" => self.shape = Shape::from_key(v).unwrap_or(self.shape),
+            "gutter" => self.gutter = f(0., 0.9, self.gutter),
+            "modulate" => self.modulate = flag(v, self.modulate),
+            "paper" => self.paper = Paper::from_key(v).unwrap_or(self.paper),
+            "transparent" => self.transparent = flag(v, self.transparent),
+            "lattice" => self.lattice = f(0., 1., self.lattice),
             "brightness" => self.brightness = f(-1., 1., self.brightness),
             "contrast" => self.contrast = f(0.25, 3., self.contrast),
             "gamma" => self.gamma = f(0.2, 5., self.gamma),
@@ -246,6 +266,12 @@ impl Recipe {
             ("seed", bare(self.seed.to_string())),
             ("cols", bare(self.cols.to_string())),
             ("scale", bare(self.scale.to_string())),
+            ("shape", text(self.shape.key())),
+            ("gutter", bare(format!("{:.2}", self.gutter))),
+            ("modulate", bare(self.modulate.to_string())),
+            ("paper", text(self.paper.key())),
+            ("transparent", bare(self.transparent.to_string())),
+            ("lattice", bare(format!("{:.2}", self.lattice))),
             ("brightness", bare(format!("{:.2}", self.brightness))),
             ("contrast", bare(format!("{:.2}", self.contrast))),
             ("gamma", bare(format!("{:.2}", self.gamma))),
@@ -284,7 +310,7 @@ impl Recipe {
     pub fn from_toml(src: &str) -> Result<Recipe, String> {
         let mut r = Recipe::default();
         let mut known = 0;
-        for (k, v) in src.lines().filter_map(parse_line) {
+        for (k, v) in src.trim_start_matches('\u{feff}').lines().filter_map(parse_line) {
             if r.apply(&k, &v) {
                 known += 1;
             }
@@ -293,6 +319,10 @@ impl Recipe {
             return Err("there's no Darkroom recipe in that file".into());
         }
         Ok(r)
+    }
+
+    pub fn look(&self) -> Look {
+        Look { shape: self.shape, gutter: self.gutter, modulate: self.modulate, paper: self.paper, transparent: self.transparent, lattice: self.lattice }
     }
 
     pub fn params(&self) -> Params {
@@ -317,6 +347,12 @@ mod tests {
             seed: 42,
             cols: 320,
             scale: 2,
+            shape: Shape::Diamond,
+            gutter: 0.35,
+            modulate: true,
+            paper: Paper::Lightest,
+            transparent: true,
+            lattice: 0.25,
             brightness: -0.25,
             contrast: 1.5,
             gamma: 1.8,
@@ -381,6 +417,13 @@ mod tests {
     }
 
     #[test]
+    fn byte_order_mark_is_ignored() {
+        // Notepad and PowerShell write one; the first key must still count.
+        let r = Recipe::from_toml("\u{feff}algorithm = \"bayer-8\"\n").unwrap();
+        assert_eq!(r.algo, Algo::Bayer8);
+    }
+
+    #[test]
     fn bundled_recipes_load() {
         let gb = Recipe::from_toml(include_str!("../recipes/gameboy.toml")).unwrap();
         assert_eq!((gb.algo, gb.palette.as_str()), (Algo::Bayer4, "gameboy"));
@@ -390,6 +433,8 @@ mod tests {
         assert_eq!((sunset.algo, sunset.palette.as_str(), sunset.colors.len(), sunset.bias), (Algo::Bayer8, palettes::CUSTOM, 7, 0.2));
         let engraving = Recipe::from_toml(include_str!("../recipes/engraving.toml")).unwrap();
         assert_eq!((engraving.algo, engraving.accent_ink, engraving.scale), (Algo::Atkinson, false, 3));
+        let dots = Recipe::from_toml(include_str!("../recipes/dots.toml")).unwrap();
+        assert_eq!((dots.shape, dots.modulate, dots.gutter, dots.scale), (Shape::Circle, true, 0.15, 8));
     }
 
     #[test]
