@@ -172,7 +172,17 @@ Progress is marked inline: ✅ done, everything else still to do.
    WebP; it needs libwebp, which isn't worth a C dependency yet).
    Original scope: Import, timeline, temporal stability, GIF/APNG/WebP
    export, batch, CLI.
-4. **0.5: masks and layers.** Luma/colour key, paint mask, layers with
+4. **0.5: masks and layers.** ✅ Brightness / colour key (eyedropper),
+   ✅ border flood (automatic cut-out from a plain backdrop, which covers
+   the knight reference without a model), ✅ painted mask with PNG
+   import/export and `--mask`; ✅ feather and invert, dithered edges;
+   ✅ a background layer with its own treatment (same, paper, or own
+   algorithm and cells). *Narrowed:* two layers (subject and background)
+   rather than any number. *Deferred past 1.0:* ONNX subject segmentation:
+   it needs onnxruntime (a large native library) and a model download,
+   and it can't be verified without a heavy local build; the border flood
+   covers plain backdrops, painting covers the rest.
+   Original scope: Luma/colour key, paint mask, layers with
    per-layer recipes; then ONNX subject segmentation.
 5. **0.6: ASCII engine.** Glyph-shape matching on PxPlus CP437, braille,
    blocks, colour ASCII, ANSI/HTML/SVG export, ASCII film.

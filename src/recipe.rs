@@ -11,8 +11,44 @@
 use ferrite_design::ascii::{Charset, Fit};
 
 use crate::engine::{Algo, Params, Rgb, Space};
+use crate::mask::{self, Kind};
 use crate::palettes;
-use crate::render::{Look, Paper, Shape};
+use crate::render::{Cells, Look, Paper, Shape};
+
+/// What the background layer (where the mask isn't) becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Background {
+    /// Developed like the subject, drawn with the background's cells.
+    Same,
+    /// Bare paper: a cut-out (with the lattice, if set).
+    Paper,
+    /// Its own algorithm, strength, threshold and cells.
+    Own,
+}
+
+impl Background {
+    pub const ALL: [Background; 3] = [Background::Same, Background::Paper, Background::Own];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Background::Same => "same",
+            Background::Paper => "paper",
+            Background::Own => "own",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Background::Same => "Same",
+            Background::Paper => "Paper",
+            Background::Own => "Its own",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Background> {
+        Background::ALL.into_iter().find(|b| b.key() == key)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -52,6 +88,15 @@ pub struct Recipe {
     pub paper: Paper,
     pub transparent: bool,
     pub lattice: f32,
+    /// Which pixels are the subject.
+    pub mask: mask::Spec,
+    pub background: Background,
+    /// The background layer's own treatment (for `Background::Own`; its
+    /// lattice also dots a `Paper` background).
+    pub bg_algo: Algo,
+    pub bg_strength: f32,
+    pub bg_bias: f32,
+    pub bg_cells: Cells,
     pub brightness: f32,
     pub contrast: f32,
     pub gamma: f32,
@@ -86,6 +131,12 @@ impl Default for Recipe {
             paper: Paper::First,
             transparent: false,
             lattice: 0.,
+            mask: mask::Spec::default(),
+            background: Background::Paper,
+            bg_algo: Algo::Bayer4,
+            bg_strength: 1.,
+            bg_bias: 0.,
+            bg_cells: Cells::default(),
             brightness: 0.,
             contrast: 1.,
             gamma: 1.,
@@ -241,6 +292,21 @@ impl Recipe {
             "paper" => self.paper = Paper::from_key(v).unwrap_or(self.paper),
             "transparent" => self.transparent = flag(v, self.transparent),
             "lattice" => self.lattice = f(0., 1., self.lattice),
+            "mask" => self.mask.kind = Kind::from_key(v).unwrap_or(self.mask.kind),
+            "mask_low" => self.mask.low = f(0., 1., self.mask.low),
+            "mask_high" => self.mask.high = f(0., 1., self.mask.high),
+            "mask_colour" => self.mask.color = parse_hex(v).unwrap_or(self.mask.color),
+            "mask_tolerance" => self.mask.tolerance = f(0., 1., self.mask.tolerance),
+            "mask_feather" => self.mask.feather = f(0., 1., self.mask.feather),
+            "mask_invert" => self.mask.invert = flag(v, self.mask.invert),
+            "background" => self.background = Background::from_key(v).unwrap_or(self.background),
+            "bg_algorithm" => self.bg_algo = Algo::from_key(v).unwrap_or(self.bg_algo),
+            "bg_strength" => self.bg_strength = f(0., 2., self.bg_strength),
+            "bg_bias" => self.bg_bias = f(-1., 1., self.bg_bias),
+            "bg_shape" => self.bg_cells.shape = Shape::from_key(v).unwrap_or(self.bg_cells.shape),
+            "bg_gutter" => self.bg_cells.gutter = f(0., 0.9, self.bg_cells.gutter),
+            "bg_modulate" => self.bg_cells.modulate = flag(v, self.bg_cells.modulate),
+            "bg_lattice" => self.bg_cells.lattice = f(0., 1., self.bg_cells.lattice),
             "brightness" => self.brightness = f(-1., 1., self.brightness),
             "contrast" => self.contrast = f(0.25, 3., self.contrast),
             "gamma" => self.gamma = f(0.2, 5., self.gamma),
@@ -282,6 +348,21 @@ impl Recipe {
             ("paper", text(self.paper.key())),
             ("transparent", bare(self.transparent.to_string())),
             ("lattice", bare(format!("{:.2}", self.lattice))),
+            ("mask", text(self.mask.kind.key())),
+            ("mask_low", bare(format!("{:.2}", self.mask.low))),
+            ("mask_high", bare(format!("{:.2}", self.mask.high))),
+            ("mask_colour", text(&hex(self.mask.color))),
+            ("mask_tolerance", bare(format!("{:.2}", self.mask.tolerance))),
+            ("mask_feather", bare(format!("{:.2}", self.mask.feather))),
+            ("mask_invert", bare(self.mask.invert.to_string())),
+            ("background", text(self.background.key())),
+            ("bg_algorithm", text(self.bg_algo.key())),
+            ("bg_strength", bare(format!("{:.2}", self.bg_strength))),
+            ("bg_bias", bare(format!("{:.2}", self.bg_bias))),
+            ("bg_shape", text(self.bg_cells.shape.key())),
+            ("bg_gutter", bare(format!("{:.2}", self.bg_cells.gutter))),
+            ("bg_modulate", bare(self.bg_cells.modulate.to_string())),
+            ("bg_lattice", bare(format!("{:.2}", self.bg_cells.lattice))),
             ("brightness", bare(format!("{:.2}", self.brightness))),
             ("contrast", bare(format!("{:.2}", self.contrast))),
             ("gamma", bare(format!("{:.2}", self.gamma))),
@@ -300,7 +381,7 @@ impl Recipe {
         self.pairs()
             .into_iter()
             .map(|(k, v)| {
-                let v = if k == "colors" { v.flat().replace('#', "") } else { v.flat() };
+                let v = if k == "colors" || k == "mask_colour" { v.flat().replace('#', "") } else { v.flat() };
                 format!("{k} = {v}\n")
             })
             .collect()
@@ -332,7 +413,22 @@ impl Recipe {
     }
 
     pub fn look(&self) -> Look {
-        Look { shape: self.shape, gutter: self.gutter, modulate: self.modulate, paper: self.paper, transparent: self.transparent, lattice: self.lattice }
+        let cells = Cells { shape: self.shape, gutter: self.gutter, modulate: self.modulate, lattice: self.lattice };
+        let bg = match self.background {
+            Background::Same => cells,
+            Background::Paper | Background::Own => self.bg_cells,
+        };
+        Look { cells, bg, paper: self.paper, transparent: self.transparent }
+    }
+
+    /// Whether a mask splits the print into layers.
+    pub fn masked(&self) -> bool {
+        self.mode == Mode::Dither && self.mask.kind != Kind::None
+    }
+
+    /// The background layer's dither settings.
+    pub fn bg_params(&self) -> Params {
+        Params { algo: self.bg_algo, strength: self.bg_strength, bias: self.bg_bias, ..self.params() }
     }
 
     /// Whether the custom palette is chosen and has its colours.
@@ -379,6 +475,12 @@ mod tests {
             paper: Paper::Lightest,
             transparent: true,
             lattice: 0.25,
+            mask: mask::Spec { kind: Kind::Color, low: 0.1, high: 0.7, color: [1., 0.4, 0.2], tolerance: 0.3, feather: 0.4, invert: true },
+            background: Background::Own,
+            bg_algo: Algo::Halftone,
+            bg_strength: 0.5,
+            bg_bias: 0.25,
+            bg_cells: Cells { shape: Shape::Plus, gutter: 0.2, modulate: true, lattice: 0.3 },
             brightness: -0.25,
             contrast: 1.5,
             gamma: 1.8,
@@ -459,6 +561,10 @@ mod tests {
         assert_eq!((sunset.algo, sunset.palette.as_str(), sunset.colors.len(), sunset.bias), (Algo::Bayer8, palettes::CUSTOM, 7, 0.2));
         let engraving = Recipe::from_toml(include_str!("../recipes/engraving.toml")).unwrap();
         assert_eq!((engraving.algo, engraving.accent_ink, engraving.scale), (Algo::Atkinson, false, 3));
+        let cutout = Recipe::from_toml(include_str!("../recipes/cutout.toml")).unwrap();
+        assert_eq!((cutout.mask.kind, cutout.background, cutout.paper, cutout.colors.len()), (Kind::Border, Background::Paper, Paper::Lightest, 2));
+        let lattice = Recipe::from_toml(include_str!("../recipes/lattice.toml")).unwrap();
+        assert_eq!((lattice.background, lattice.bg_algo, lattice.bg_cells.gutter), (Background::Own, Algo::Bayer4, 0.35));
         let dots = Recipe::from_toml(include_str!("../recipes/dots.toml")).unwrap();
         assert_eq!((dots.shape, dots.modulate, dots.gutter, dots.scale), (Shape::Circle, true, 0.15, 8));
     }

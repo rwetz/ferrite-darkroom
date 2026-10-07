@@ -1,0 +1,16 @@
+# A Darkroom recipe: a subject on a plain backdrop, cut out and dithered in
+# one blue ink on warm white, like an engraving printed in cobalt. The
+# border mask finds the backdrop by itself; raise its tolerance if the
+# backdrop is uneven.
+mode = "dither"
+algorithm = "floyd-steinberg"
+palette = "custom"
+colors = ["#f8f6f2", "#1f3f8f"]
+cols = 200
+scale = 4
+contrast = 1.10
+mask = "border"
+mask_tolerance = 0.08
+mask_feather = 0.15
+background = "paper"
+paper = "lightest"

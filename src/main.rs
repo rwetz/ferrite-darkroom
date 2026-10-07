@@ -14,6 +14,7 @@
 mod batch;
 mod cli;
 mod engine;
+mod mask;
 mod palettes;
 mod recipe;
 mod render;
@@ -21,6 +22,7 @@ mod sequence;
 mod settings;
 mod studio;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -31,12 +33,14 @@ use std::time::{Duration, Instant};
 use ferrite_design::ascii::{Charset, Fit};
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, Corners, Entity, ExternalPaths, Hsla, IntoElement,
-    KeyBinding, PathPromptOptions, Pixels, Render, RenderImage, Rgba, Subscription, Window, canvas, div, fill, point, px, size,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, Render, RenderImage, Rgba, Subscription, Window,
+    canvas, div, fill, point, px, size,
 };
 use ferrite_design::prelude::*;
 
 use engine::{Algo, Rgb, Space};
-use recipe::{Mode, Recipe};
+use mask::Kind;
+use recipe::{Background, Mode, Recipe};
 use render::{Paper, Shape};
 use settings::Settings;
 use sequence::Clip;
@@ -63,6 +67,8 @@ enum View {
     Compare,
     /// One thumbnail per algorithm or palette; click to adopt.
     Sheet,
+    /// The photo with the background dimmed: paint here, or pick a key colour.
+    Mask,
 }
 
 #[derive(Clone, Copy, PartialEq, Hash)]
@@ -124,6 +130,20 @@ fn texture(image: Arc<RenderImage>, dw: u32, dh: u32, sf: f32) -> impl IntoEleme
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window: &mut Window, _| {
             let target = snapped(bounds, dw, dh, window.scale_factor());
+            let _ = window.paint_image(target, target, Corners::default(), image, 0, false);
+        },
+    )
+    .w(px(dw as f32 / sf))
+    .h(px(dh as f32 / sf))
+}
+
+/// [`texture`], also reporting where it was painted (for brushes).
+fn texture_at(image: Arc<RenderImage>, dw: u32, dh: u32, sf: f32, at: Rc<Cell<Option<Bounds<Pixels>>>>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds: Bounds<Pixels>, _, window: &mut Window, _| {
+            let target = snapped(bounds, dw, dh, window.scale_factor());
+            at.set(Some(target));
             let _ = window.paint_image(target, target, Corners::default(), image, 0, false);
         },
     )
@@ -202,6 +222,9 @@ struct DevKey {
     serpentine: bool,
     space: Space,
     palette: Vec<[u32; 3]>,
+    /// The rest of the recipe (masks and layers), and the painted mask.
+    recipe: String,
+    paint: u64,
 }
 
 /// The developed art and what it was developed with.
@@ -244,6 +267,16 @@ struct Darkroom {
     playing: bool,
     /// Bumped to stop the running playback loop.
     play_gen: u64,
+    /// The photo's painted mask, and a counter bumped on every stroke.
+    paint: Option<mask::Paint>,
+    paint_rev: u64,
+    /// Brush radius as a share of the width, and whether it erases.
+    brush: f32,
+    erasing: bool,
+    /// The last dab of the stroke under way, to fill gaps between events.
+    last_dab: Option<(f32, f32)>,
+    /// Where the mask view's print was last drawn.
+    print_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     typeset: Option<Typeset>,
     palette: Entity<CommandPalette>,
     toaster: Entity<Toaster>,
@@ -270,6 +303,12 @@ impl Darkroom {
             reel_job: None,
             playing: false,
             play_gen: 0,
+            paint: None,
+            paint_rev: 0,
+            brush: 0.04,
+            erasing: false,
+            last_dab: None,
+            print_at: Rc::new(Cell::new(None)),
             typeset: None,
             palette: cx.new(|cx| CommandPalette::new(window, cx)),
             toaster: cx.new(|_| Toaster::new()),
@@ -389,6 +428,10 @@ impl Darkroom {
             command("New random seed").group("Develop").icon(Icon::Refresh).on_run(run(|this, _, cx| this.reseed(cx))),
             command("Undo").group("Edit").shortcut("Ctrl+Z").on_run(run(|this, _, cx| this.undo(cx))),
             command("Redo").group("Edit").shortcut("Ctrl+Shift+Z").on_run(run(|this, _, cx| this.redo(cx))),
+            command("View: mask").group("View").on_run(run(|this, _, cx| this.set_view(View::Mask, cx))),
+            command("Import mask…").group("Mask").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_mask(cx))),
+            command("Export mask…").group("Mask").icon(Icon::File).on_run(run(|this, _, cx| this.export_mask(cx))),
+            command("Clear painted mask").group("Mask").on_run(run(|this, _, cx| this.clear_paint(cx))),
             command("View: print").group("View").on_run(run(|this, _, cx| this.set_view(View::Print, cx))),
             command("View: compare with the photo").group("View").on_run(run(|this, _, cx| this.set_view(View::Compare, cx))),
             command("View: contact sheet of algorithms").group("View").on_run(run(|this, _, cx| {
@@ -616,6 +659,78 @@ impl Darkroom {
         self.typeset = None;
         self.reel = None;
         self.tiles = None;
+        self.paint = None;
+        self.paint_rev += 1;
+    }
+
+    // ── Masks ────────────────────────────────────────────────────────────
+
+    /// Where a window position falls on the print, 0..1 each way.
+    fn print_uv(&self, at: Point<Pixels>) -> Option<(f32, f32)> {
+        let b = self.print_at.get()?;
+        let u = (f32::from(at.x) - f32::from(b.origin.x)) / f32::from(b.size.width);
+        let v = (f32::from(at.y) - f32::from(b.origin.y)) / f32::from(b.size.height);
+        ((0. ..=1.).contains(&u) && (0. ..=1.).contains(&v)).then_some((u, v))
+    }
+
+    /// A click or drag on the mask view: paint, or pick the key colour.
+    fn mask_at(&mut self, at: Point<Pixels>, starting: bool, cx: &mut Context<Self>) {
+        let Some((u, v)) = self.print_uv(at) else { return };
+        match self.settings.recipe.mask.kind {
+            Kind::Paint => {
+                let print = self.photo.print();
+                let (pw, ph) = (print.w, print.h);
+                let paint = self.paint.get_or_insert_with(|| mask::Paint::blank(pw, ph));
+                // Fill the gap since the last event with dabs half a brush apart.
+                let from = if starting { (u, v) } else { self.last_dab.unwrap_or((u, v)) };
+                let steps = (((u - from.0).hypot((v - from.1) * ph as f32 / pw as f32)) / (self.brush * 0.5)).ceil().max(1.) as usize;
+                for k in 1..=steps {
+                    let t = k as f32 / steps as f32;
+                    paint.dab(from.0 + (u - from.0) * t, from.1 + (v - from.1) * t, self.brush, !self.erasing);
+                }
+                self.last_dab = Some((u, v));
+                self.paint_rev += 1;
+                cx.notify();
+            }
+            Kind::Color if starting => {
+                let print = self.photo.print();
+                let (x, y) = (((u * print.w as f32) as u32).min(print.w - 1), ((v * print.h as f32) as u32).min(print.h - 1));
+                let color = print.rgb[(y * print.w + x) as usize];
+                self.set_recipe(|r| r.mask.color = color, cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn clear_paint(&mut self, cx: &mut Context<Self>) {
+        self.paint = None;
+        self.paint_rev += 1;
+        cx.notify();
+    }
+
+    fn export_mask(&mut self, cx: &mut Context<Self>) {
+        match self.paint.as_ref().filter(|p| !p.is_empty()).map(mask::Paint::png) {
+            Some(Ok(bytes)) => self.save_as(format!("{}-mask.png", self.stem()), bytes, "Mask", cx),
+            Some(Err(why)) => self.toast(toast("Couldn't make the mask").danger().message(why), cx),
+            None => self.toast(toast("Nothing painted yet").message("Choose the Painted mask, then paint on the print in the Mask view"), cx),
+        }
+    }
+
+    fn import_mask(&mut self, cx: &mut Context<Self>) {
+        self.ask_path("Import mask", Self::import_mask_path, cx);
+    }
+
+    fn import_mask_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        match image::open(&path) {
+            Ok(img) => {
+                let print = self.photo.print();
+                self.paint = Some(mask::Paint::from_image(&img.to_luma8(), print.w, print.h));
+                self.paint_rev += 1;
+                self.set_recipe(|r| r.mask.kind = Kind::Paint, cx);
+                self.toast(toast("Mask imported").success(), cx);
+            }
+            Err(e) => self.toast(toast("Couldn't read that mask").danger().message(e.to_string()), cx),
+        }
     }
 
     // ── Animation ────────────────────────────────────────────────────────
@@ -624,7 +739,7 @@ impl Darkroom {
     fn reel_key(&self, cx: &App) -> u64 {
         let r = &self.settings.recipe;
         let colors: Vec<[u32; 3]> = self.palette_colors(cx).iter().map(|c| c.map(f32::to_bits)).collect();
-        key_of((self.roll, Self::adjust_key(self.adjust(cx)), r.cols, r.algo, r.strength.to_bits(), r.bias.to_bits(), r.seed, r.serpentine, r.space, r.stability.to_bits(), colors))
+        key_of((self.roll, Self::adjust_key(self.adjust(cx)), r.flat_lines(), self.paint_rev, colors))
     }
 
     /// The developed reel, if it's current; otherwise start developing it
@@ -639,11 +754,11 @@ impl Darkroom {
         if self.reel_job.is_none() {
             self.reel_job = Some(key);
             let clip = self.photo.clip.clone();
-            let (a, colors, r) = (self.adjust(cx), self.palette_colors(cx), self.settings.recipe.clone());
+            let (a, colors, r, paint) = (self.adjust(cx), self.palette_colors(cx), self.settings.recipe.clone(), self.paint.clone());
             cx.spawn(async move |this, cx| {
                 let arts = cx
                     .background_executor()
-                    .spawn(async move { sequence::develop_all(&clip.frames, r.cols, a, &colors, r.params(), r.stability) })
+                    .spawn(async move { sequence::develop_all(&clip.frames, &r, a, &colors, paint.as_ref()) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     this.reel_job = None;
@@ -730,7 +845,7 @@ impl Darkroom {
         let key = self.reel_key(cx);
         let ready = self.reel.as_ref().filter(|(k, _)| *k == key).map(|(_, arts)| arts.clone());
         let clip = self.photo.clip.clone();
-        let (a, colors, r) = (self.adjust(cx), self.palette_colors(cx), self.settings.recipe.clone());
+        let (a, colors, r, paint) = (self.adjust(cx), self.palette_colors(cx), self.settings.recipe.clone(), self.paint.clone());
         let (ext, label): (&str, &'static str) = match what {
             AnimOut::Gif => ("gif", "GIF"),
             AnimOut::Apng => ("png", "APNG"),
@@ -745,7 +860,7 @@ impl Darkroom {
                 .spawn(async move {
                     let arts = match ready {
                         Some(arts) => arts,
-                        None => Arc::new(sequence::develop_all(&clip.frames, r.cols, a, &colors, r.params(), r.stability)),
+                        None => Arc::new(sequence::develop_all(&clip.frames, &r, a, &colors, paint.as_ref())),
                     };
                     let delays = sequence::delays(&clip.frames, r.speed);
                     match what {
@@ -843,7 +958,7 @@ impl Darkroom {
     fn batch(&mut self, cx: &mut Context<Self>) {
         let dirs = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Develop folder".into()) });
         let (paper, ink) = self.scheme_inks(cx);
-        let job = batch::Job { recipe: self.settings.recipe.clone(), paper, ink };
+        let job = batch::Job { recipe: self.settings.recipe.clone(), paper, ink, paint: self.paint.clone() };
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(dirs))) = dirs.await else { return };
             let Some(dir) = dirs.into_iter().next() else { return };
@@ -882,14 +997,15 @@ impl Darkroom {
             serpentine: s.recipe.serpentine,
             space: s.recipe.space,
             palette: colors.iter().map(|c| c.map(f32::to_bits)).collect(),
+            recipe: s.recipe.flat_lines(),
+            paint: self.paint_rev,
         };
         if let Some(d) = &self.developed
             && d.key == key
         {
             return d.art.clone();
         }
-        let params = s.recipe.params();
-        let art = Rc::new(studio::develop(self.photo.print(), s.recipe.cols, a, colors, params));
+        let art = Rc::new(studio::develop_recipe(self.photo.print(), &s.recipe, a, colors, self.paint.as_ref(), None));
         self.developed = Some(Developed { key, art: art.clone() });
         art
     }
@@ -908,25 +1024,27 @@ impl Darkroom {
             choices.push(("Custom", r.colors.clone(), custom));
         }
         let bits = |c: &[Rgb]| c.iter().map(|c| c.map(f32::to_bits)).collect::<Vec<_>>();
-        let inputs = key_of((self.sheet, self.roll, Self::adjust_key(a), r.flat_lines(), bits(&current), choices.iter().map(|c| bits(&c.1)).collect::<Vec<_>>()));
+        let inputs = key_of((self.sheet, self.roll, self.paint_rev, Self::adjust_key(a), r.flat_lines(), bits(&current), choices.iter().map(|c| bits(&c.1)).collect::<Vec<_>>()));
         if let Some((k, tiles)) = &self.tiles
             && *k == inputs
         {
             return tiles.clone();
         }
         let print = self.photo.print();
+        let paint = self.paint.as_ref();
+        let small = Recipe { cols: THUMB_COLS, ..r.clone() };
         let tiles: Vec<Tile> = match self.sheet {
             SheetKind::Algorithms => Algo::ALL
                 .iter()
                 .map(|&algo| Tile {
                     label: algo.name(),
-                    art: Rc::new(studio::develop(print, THUMB_COLS, a, current.clone(), engine::Params { algo, ..r.params() })),
+                    art: Rc::new(studio::develop_recipe(print, &Recipe { algo, ..small.clone() }, a, current.clone(), paint, None)),
                     current: algo == r.algo,
                 })
                 .collect(),
             SheetKind::Palettes => choices
                 .into_iter()
-                .map(|(label, colors, current)| Tile { label, art: Rc::new(studio::develop(print, THUMB_COLS, a, colors, r.params())), current })
+                .map(|(label, colors, current)| Tile { label, art: Rc::new(studio::develop_recipe(print, &small, a, colors, paint, None)), current })
                 .collect(),
         };
         let tiles = Rc::new(tiles);
@@ -1023,6 +1141,28 @@ impl Darkroom {
                 let look = self.settings.recipe.look();
                 let after = self.tex.get(key_of(("after", dev, cell, look.bits())), || render::bgra(&art, cell, look));
                 let (dw, dh) = (w * cell, h * cell);
+                if self.view == View::Mask {
+                    let (print, r) = (self.photo.print(), &self.settings.recipe);
+                    let adjust = self.adjust(cx);
+                    let paint = self.paint.as_ref();
+                    let key = key_of(("mask", self.roll, self.photo.frame, self.paint_rev, r.flat_lines(), Self::adjust_key(adjust), cell));
+                    let image = self.tex.get(key, || studio::mask_bgra(print, r, adjust, paint, cell));
+                    return div()
+                        .id("mask-easel")
+                        .cursor_crosshair()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &MouseDownEvent, _, cx| this.mask_at(e.position, true, cx)),
+                        )
+                        .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                            if e.pressed_button == Some(MouseButton::Left) {
+                                this.mask_at(e.position, false, cx)
+                            }
+                        }))
+                        .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.last_dab = None))
+                        .child(texture_at(image, dw, dh, sf, self.print_at.clone()))
+                        .into_any_element();
+                }
                 if self.view == View::Compare {
                     let print = self.photo.print();
                     let before = self.tex.get(key_of(("before", self.roll, self.photo.frame, w, h, cell)), || render::before_bgra(print, w, h, cell));
@@ -1106,12 +1246,13 @@ impl Darkroom {
 
     /// The row over the print: which view, and that view's controls.
     fn view_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let views = [View::Print, View::Compare, View::Sheet];
+        let views = [View::Print, View::Compare, View::Sheet, View::Mask];
         let mut bar = div().flex().flex_row().items_center().gap_4().child(
             segmented("view-seg")
                 .option("Print")
                 .option("Compare")
-                .option("Contact sheet")
+                .option("Sheet")
+                .option("Mask")
                 .selected(views.iter().position(|v| *v == self.view).unwrap_or(0))
                 .on_select(cx.listener(move |this, i: &usize, _, cx| this.set_view(views[*i], cx))),
         );
@@ -1141,6 +1282,16 @@ impl Darkroom {
                             cx.notify();
                         })),
                 )
+            }
+            View::Mask => {
+                let p = palette(cx);
+                let hint = match self.settings.recipe.mask.kind {
+                    Kind::Paint => "Drag to paint the subject",
+                    Kind::Color => "Click the colour to key on",
+                    Kind::None => "Choose a mask in the sidebar",
+                    _ => "The dimmed part is the background",
+                };
+                bar = bar.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(hint))
             }
             View::Print => {}
         }
@@ -1205,6 +1356,139 @@ impl Darkroom {
                     .format(|v| if v <= 0. { "off".into() } else { format!("{:.0}%", v * 100.).into() })
                     .on_change(cx.listener(|this, v: &f32, _, cx| this.set_recipe(|r| r.lattice = *v, cx))),
             ))
+    }
+
+    /// The mask, and what the background layer becomes.
+    fn mask_controls(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let r = &self.settings.recipe;
+        let kind = r.mask.kind;
+        let slider_row = |id: &'static str, label: &'static str, lo: f32, hi: f32, value: f32, set: fn(&mut Recipe, f32), cx: &mut Context<Self>| {
+            field(id, label).stacked().child(
+                slider(id)
+                    .range(lo, hi)
+                    .step(0.01)
+                    .value(value)
+                    .width(px(220.))
+                    .format(|v| format!("{:.0}%", v * 100.).into())
+                    .on_change(cx.listener(move |this, v: &f32, _, cx| this.set_recipe(|r| set(r, *v), cx))),
+            )
+        };
+        let mut col = div().flex().flex_col().gap_3().child(
+            field("mask-kind", "Mask").hint("Splits the print into a subject and a background").stacked().child(
+                select("mask-select")
+                    .options(Kind::ALL.iter().map(|k| k.name()))
+                    .selected(Kind::ALL.iter().position(|k| *k == kind))
+                    .width(px(220.))
+                    .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.mask.kind = Kind::ALL[*i], cx))),
+            ),
+        );
+        match kind {
+            Kind::None => return col,
+            Kind::Luma => {
+                col = col
+                    .child(slider_row("mask-low", "Darkest", 0., 1., r.mask.low, |r, v| r.mask.low = v, cx))
+                    .child(slider_row("mask-high", "Lightest", 0., 1., r.mask.high, |r, v| r.mask.high = v, cx));
+            }
+            Kind::Color => {
+                let [cr, cg, cb] = r.mask.color;
+                col = col
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(14.)).h(px(14.)).bg(Rgba { r: cr, g: cg, b: cb, a: 1. }))
+                            .child(div().body(text::SM).child(format!("{} · click the print in the Mask view to pick", recipe::hex(r.mask.color)))),
+                    )
+                    .child(slider_row("mask-tol", "Tolerance", 0., 1., r.mask.tolerance, |r, v| r.mask.tolerance = v, cx));
+            }
+            Kind::Border => {
+                col = col.child(slider_row("mask-tol", "Tolerance", 0., 1., r.mask.tolerance, |r, v| r.mask.tolerance = v, cx));
+            }
+            Kind::Paint => {
+                col = col
+                    .child(field("brush", "Brush").stacked().child(
+                        slider("brush-slider")
+                            .range(0.005, 0.2)
+                            .step(0.005)
+                            .value(self.brush)
+                            .width(px(220.))
+                            .format(|v| format!("{:.1}%", v * 100.).into())
+                            .on_change(cx.listener(|this, v: &f32, _, cx| {
+                                this.brush = *v;
+                                cx.notify();
+                            })),
+                    ))
+                    .child(
+                        segmented("brush-seg")
+                            .option("Paint")
+                            .option("Erase")
+                            .selected(if self.erasing { 1 } else { 0 })
+                            .on_select(cx.listener(|this, i: &usize, _, cx| {
+                                this.erasing = *i == 1;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(Button::new("view-mask").label("Paint…").ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_view(View::Mask, cx))))
+                            .child(Button::new("clear-mask").label("Clear").ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.clear_paint(cx))))
+                            .child(Button::new("import-mask").label("Import…").ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.import_mask(cx))))
+                            .child(Button::new("export-mask").label("Export…").ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_mask(cx)))),
+                    );
+            }
+        }
+        col = col
+            .child(slider_row("mask-feather", "Feather", 0., 1., r.mask.feather, |r, v| r.mask.feather = v, cx))
+            .child(
+                switch("mask-invert")
+                    .label("Invert")
+                    .checked(r.mask.invert)
+                    .on_change(cx.listener(|this, on: &bool, _, cx| this.set_recipe(|r| r.mask.invert = *on, cx))),
+            )
+            .child(
+                field("background", "Background").hint("Where the mask isn't").stacked().child(
+                    Background::ALL
+                        .iter()
+                        .fold(segmented("bg-seg"), |seg, b| seg.option(b.name()))
+                        .selected(Background::ALL.iter().position(|b| *b == r.background).unwrap_or(0))
+                        .on_select(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.background = Background::ALL[*i], cx))),
+                ),
+            );
+        if r.background == Background::Own {
+            col = col
+                .child(field("bg-algo", "Background algorithm").stacked().child(
+                    select("bg-algo-select")
+                        .options(Algo::ALL.iter().map(|a| a.name()))
+                        .selected(Algo::ALL.iter().position(|a| *a == r.bg_algo))
+                        .width(px(220.))
+                        .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.bg_algo = Algo::ALL[*i], cx))),
+                ))
+                .child(slider_row("bg-strength", "Background strength", 0., 2., r.bg_strength, |r, v| r.bg_strength = v, cx))
+                .child(field("bg-shape", "Background shape").stacked().child(
+                    select("bg-shape-select")
+                        .options(Shape::ALL.iter().map(|sh| sh.name()))
+                        .selected(Shape::ALL.iter().position(|sh| *sh == r.bg_cells.shape))
+                        .width(px(220.))
+                        .on_change(cx.listener(|this, i: &usize, _, cx| this.set_recipe(|r| r.bg_cells.shape = Shape::ALL[*i], cx))),
+                ))
+                .child(slider_row("bg-gutter", "Background gutter", 0., 0.9, r.bg_cells.gutter, |r, v| r.bg_cells.gutter = v, cx))
+                .child(
+                    switch("bg-modulate")
+                        .label("Background size by tone")
+                        .checked(r.bg_cells.modulate)
+                        .on_change(cx.listener(|this, on: &bool, _, cx| this.set_recipe(|r| r.bg_cells.modulate = *on, cx))),
+                );
+        }
+        if r.background != Background::Same {
+            col = col.child(slider_row("bg-lattice", "Background lattice", 0., 1., r.bg_cells.lattice, |r, v| r.bg_cells.lattice = v, cx));
+        }
+        col
     }
 
     fn anim_controls(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1483,6 +1767,7 @@ impl Darkroom {
                     ))
                     .child(switch("invert").label("Invert").checked(s.recipe.invert).on_change(cx.listener(|this, on: &bool, window, cx| this.change(|s| s.recipe.invert = *on, window, cx))))
                     .when(mode == Mode::Dither, |el| el.child(rule(Some("render"), window, cx)).child(self.render_controls(cx)))
+                    .when(mode == Mode::Dither, |el| el.child(rule(Some("mask"), window, cx)).child(self.mask_controls(cx)))
                     .when(mode == Mode::Dither && animated, |el| el.child(rule(Some("animation"), window, cx)).child(self.anim_controls(cx)))
                     .child(rule(Some("palette"), window, cx))
                     .when(mode == Mode::Dither, |el| el.child(self.palette_picker(cx)))

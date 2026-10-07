@@ -57,9 +57,10 @@ impl Shape {
 }
 
 /// Which palette colour is the paper the shapes sit on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Paper {
     /// The palette's first colour: the scheme's background for Scheme.
+    #[default]
     First,
     Darkest,
     Lightest,
@@ -89,37 +90,58 @@ impl Paper {
     }
 }
 
+/// How one layer's cells are drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Look {
+pub struct Cells {
     pub shape: Shape,
     /// 0..0.9: the share of each cell left as gap.
     pub gutter: f32,
     /// Shapes shrink where the photo had less of their colour.
     pub modulate: bool,
-    pub paper: Paper,
-    /// The paper is left transparent (PNG exports; the preview shows the
-    /// easel through it).
-    pub transparent: bool,
     /// 0..1: a dot of this size, in the colour furthest from the paper, on
     /// every bare paper cell. 0 = off.
     pub lattice: f32,
 }
 
-impl Default for Look {
+impl Default for Cells {
     fn default() -> Self {
-        Look { shape: Shape::Square, gutter: 0., modulate: false, paper: Paper::First, transparent: false, lattice: 0. }
+        Cells { shape: Shape::Square, gutter: 0., modulate: false, lattice: 0. }
     }
 }
 
-impl Look {
+impl Cells {
     /// Plain squares edge to edge: every cell is one solid block.
     fn is_plain(&self) -> bool {
         self.shape == Shape::Square && self.gutter <= 0. && !self.modulate && self.lattice <= 0.
     }
 
+    fn bits(&self) -> (Shape, u32, bool, u32) {
+        (self.shape, self.gutter.to_bits(), self.modulate, self.lattice.to_bits())
+    }
+}
+
+/// How a print is drawn: the subject's cells, the background layer's cells
+/// (used where a mask put the background), and the paper.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Look {
+    pub cells: Cells,
+    pub bg: Cells,
+    pub paper: Paper,
+    /// The paper is left transparent (PNG exports; the preview shows the
+    /// easel through it).
+    pub transparent: bool,
+}
+
+impl Look {
+    /// One cell look for both layers.
+    #[cfg(test)]
+    pub fn of(cells: Cells) -> Look {
+        Look { cells, bg: cells, ..Look::default() }
+    }
+
     /// For cache keys.
-    pub fn bits(&self) -> (Shape, u32, bool, Paper, bool, u32) {
-        (self.shape, self.gutter.to_bits(), self.modulate, self.paper, self.transparent, self.lattice.to_bits())
+    pub fn bits(&self) -> impl std::hash::Hash + use<> {
+        (self.cells.bits(), self.bg.bits(), self.paper, self.transparent)
     }
 }
 
@@ -149,7 +171,8 @@ pub fn rgba(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
     let ink_of = |i: u8| if look.transparent && i as usize == paper { [0; 4] } else { lut[i as usize] };
 
     let mut out = vec![0u8; (w * h * 4) as usize];
-    if look.is_plain() {
+    let layered = !art.layer.is_empty();
+    if look.cells.is_plain() && (!layered || look.bg.is_plain()) {
         for y in 0..h {
             let row = &art.index[((y / cell) * art.w) as usize..][..art.w as usize];
             let line = &mut out[(y * w * 4) as usize..][..(w * 4) as usize];
@@ -171,20 +194,20 @@ pub fn rgba(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
     });
     let color_l: Vec<f32> = art.colors.iter().map(|&c| oklab(c)[0]).collect();
     let half = cell as f32 / 2.;
-    let full = half * (1. - look.gutter.clamp(0., 0.9));
 
     for ay in 0..art.h {
         for ax in 0..art.w {
             let at = (ay * art.w + ax) as usize;
             let i = art.index[at] as usize;
+            let cl = if layered && art.layer[at] == 1 { look.bg } else { look.cells };
             let (color, r) = if i == paper {
                 match contrast {
-                    Some(c) if look.lattice > 0. && c != paper => (lut[c], half * look.lattice.clamp(0., 1.)),
+                    Some(c) if cl.lattice > 0. && c != paper => (lut[c], half * cl.lattice.clamp(0., 1.)),
                     _ => continue,
                 }
             } else {
-                let mut r = full;
-                if look.modulate {
+                let mut r = half * (1. - cl.gutter.clamp(0., 0.9));
+                if cl.modulate {
                     // How much of this colour the photo had here, as area.
                     let span = (color_l[i] - paper_l).abs().max(0.05);
                     let level = ((art.lum[at] - paper_l).abs() / span).clamp(0.15, 1.);
@@ -198,7 +221,7 @@ pub fn rgba(art: &Art, cell: u32, look: Look) -> (u32, u32, Vec<u8>) {
                 for cx in 0..cell {
                     let dx = cx as f32 + 0.5 - half;
                     // The centre pixel always draws, so 1× and 2× keep their pixels.
-                    if look.shape.contains(dx, dy, r) || (dx.abs() < 0.5 && dy.abs() < 0.5) {
+                    if cl.shape.contains(dx, dy, r) || (dx.abs() < 0.5 && dy.abs() < 0.5) {
                         out[row + cx as usize * 4..][..4].copy_from_slice(&color);
                     }
                 }
@@ -250,7 +273,7 @@ mod tests {
 
     /// A 2×1 art: paper then ink, with full tone on the ink.
     fn art() -> Art {
-        Art { w: 2, h: 1, index: vec![0, 1], colors: vec![PAPER, INK], lum: vec![0., 1.] }
+        Art { w: 2, h: 1, index: vec![0, 1], colors: vec![PAPER, INK], lum: vec![0., 1.], layer: vec![] }
     }
 
     fn at(px: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
@@ -267,7 +290,7 @@ mod tests {
 
     #[test]
     fn gutter_leaves_paper_round_shapes() {
-        let look = Look { shape: Shape::Circle, gutter: 0.5, ..Look::default() };
+        let look = Look::of(Cells { shape: Shape::Circle, gutter: 0.5, ..Cells::default() });
         let (w, _, px) = rgba(&art(), 8, look);
         // The ink cell's centre is ink, its corner is paper.
         assert_eq!(at(&px, w, 12, 4), [255, 255, 255, 255]);
@@ -277,7 +300,7 @@ mod tests {
     #[test]
     fn shapes_differ() {
         let ink_count = |shape| {
-            let (_, _, px) = rgba(&art(), 12, Look { shape, gutter: 0.1, ..Look::default() });
+            let (_, _, px) = rgba(&art(), 12, Look::of(Cells { shape, gutter: 0.1, ..Cells::default() }));
             px.as_chunks::<4>().0.iter().filter(|p| p[0] == 255).count()
         };
         let (sq, ci, di, pl) = (ink_count(Shape::Square), ink_count(Shape::Circle), ink_count(Shape::Diamond), ink_count(Shape::Plus));
@@ -299,18 +322,32 @@ mod tests {
     fn modulate_shrinks_weak_tones() {
         let mut weak = art();
         weak.lum = vec![0., 0.3];
-        let look = Look { shape: Shape::Square, modulate: true, ..Look::default() };
+        let look = Look::of(Cells { shape: Shape::Square, modulate: true, ..Cells::default() });
         let ink = |a: &Art| rgba(a, 10, look).2.as_chunks::<4>().0.iter().filter(|p| p[0] == 255).count();
         assert!(ink(&weak) < ink(&art()));
     }
 
     #[test]
     fn lattice_dots_the_paper() {
-        let look = Look { shape: Shape::Circle, lattice: 0.4, ..Look::default() };
+        let look = Look::of(Cells { shape: Shape::Circle, lattice: 0.4, ..Cells::default() });
         let (w, _, px) = rgba(&art(), 10, look);
         // The paper cell gets a small dot at its centre, paper at its corner.
         assert_eq!(at(&px, w, 5, 5), [255, 255, 255, 255]);
         assert_eq!(at(&px, w, 0, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn layers_draw_their_own_cells() {
+        // Two ink pixels; the second is background, drawn as a small circle.
+        let mut a = Art { w: 2, h: 1, index: vec![1, 1], colors: vec![PAPER, INK], lum: vec![1., 1.], layer: vec![0, 1] };
+        let look = Look { bg: Cells { shape: Shape::Circle, gutter: 0.6, ..Cells::default() }, ..Look::default() };
+        let (w, _, px) = rgba(&a, 10, look);
+        assert_eq!(at(&px, w, 0, 0), [255, 255, 255, 255], "subject: a full square");
+        assert_eq!(at(&px, w, 10, 0), [0, 0, 0, 255], "background: a small dot, corner bare");
+        assert_eq!(at(&px, w, 15, 5), [255, 255, 255, 255]);
+        // Without layers, the background look is ignored.
+        a.layer.clear();
+        assert_eq!(at(&rgba(&a, 10, look).2, w, 10, 0), [255, 255, 255, 255]);
     }
 
     #[test]
@@ -323,7 +360,7 @@ mod tests {
 
     #[test]
     fn one_pixel_cells_keep_every_pixel() {
-        let look = Look { shape: Shape::Plus, gutter: 0.8, ..Look::default() };
+        let look = Look::of(Cells { shape: Shape::Plus, gutter: 0.8, ..Cells::default() });
         let (_, _, px) = rgba(&art(), 1, look);
         assert_eq!(px, vec![0, 0, 0, 255, 255, 255, 255, 255]);
     }

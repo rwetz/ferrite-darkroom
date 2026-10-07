@@ -26,6 +26,8 @@ OUT's extension picks the format: .png (an APNG for an animation), .gif, .txt (A
 
 Options:
   --recipe FILE     a recipe saved from the app (default: the app's last recipe)
+  --mask FILE       a painted mask (greyscale PNG, light = subject), for
+                    recipes with mask = painted
   --scheme KEY      the scheme for the Scheme palette: ferrite mono graphite slate
                     concrete harbor cyanotype phosphor verdigris bruise
   --light, --dark   the scheme's appearance
@@ -43,6 +45,7 @@ enum Command {
 #[derive(Debug, Default, PartialEq)]
 struct Opts {
     recipe: Option<PathBuf>,
+    mask: Option<PathBuf>,
     scheme: Option<String>,
     light: Option<bool>,
 }
@@ -57,6 +60,7 @@ fn parse(args: &[String]) -> Result<Option<Command>, String> {
             "-o" | "--output" => output = Some(PathBuf::from(value(&mut it, arg)?)),
             "--batch" => batch = Some(PathBuf::from(value(&mut it, arg)?)),
             "--recipe" => opts.recipe = Some(PathBuf::from(value(&mut it, arg)?)),
+            "--mask" => opts.mask = Some(PathBuf::from(value(&mut it, arg)?)),
             "--scheme" => opts.scheme = Some(value(&mut it, arg)?),
             "--light" => opts.light = Some(true),
             "--dark" => opts.light = Some(false),
@@ -83,7 +87,12 @@ fn job(opts: &Opts) -> Result<Job, String> {
     };
     let scheme = opts.scheme.clone().unwrap_or(settings.scheme);
     let light = opts.light.unwrap_or(settings.appearance == "light");
-    Ok(Job::with_scheme(recipe, &scheme, light))
+    let mut job = Job::with_scheme(recipe, &scheme, light);
+    if let Some(path) = &opts.mask {
+        let img = image::open(path).map_err(|e| format!("couldn't read the mask {}: {e}", path.display()))?.to_luma8();
+        job.paint = Some(crate::mask::Paint::from_image(&img, img.width(), img.height()));
+    }
+    Ok(job)
 }
 
 /// Run a command-line job if one was asked for. `None` means open the app.
@@ -167,7 +176,7 @@ mod tests {
             Command::File {
                 input: "in.gif".into(),
                 output: "out.gif".into(),
-                opts: Opts { recipe: Some("gb.toml".into()), scheme: Some("phosphor".into()), light: Some(true) }
+                opts: Opts { recipe: Some("gb.toml".into()), mask: None, scheme: Some("phosphor".into()), light: Some(true) }
             }
         );
     }
