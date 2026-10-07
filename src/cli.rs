@@ -22,7 +22,8 @@ Darkroom: dither photos and animations into pixel art.
   ferrite-darkroom --batch DIR [-o OUTDIR]     develop every picture in DIR
                                                (into DIR/darkroom unless -o)
 
-OUT's extension picks the format: .png (an APNG for an animation), .gif, or text art:
+OUT's extension picks the format: .png (an APNG for an animation), .gif, .mp4 (needs
+ffmpeg), or text art:
 .txt, .ans (ANSI colour), .html (a film for an animation), .svg.
 
 Options:

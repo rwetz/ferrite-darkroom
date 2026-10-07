@@ -11,6 +11,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod algos;
 mod batch;
 mod cli;
 mod engine;
@@ -208,6 +209,7 @@ enum AnimOut {
     Gif,
     Apng,
     Sheet,
+    Mp4,
 }
 
 /// Everything a dither depends on, compared bit for bit to skip redevelops.
@@ -280,6 +282,10 @@ struct Darkroom {
     last_dab: Option<(f32, f32)>,
     /// Where the mask view's print was last drawn.
     print_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// How many colours "From photo" extracts.
+    extract_n: usize,
+    /// ffmpeg is installed (video in, MP4 out).
+    ffmpeg: bool,
     typeset: Option<Typeset>,
     palette: Entity<CommandPalette>,
     toaster: Entity<Toaster>,
@@ -312,6 +318,8 @@ impl Darkroom {
             erasing: false,
             last_dab: None,
             print_at: Rc::new(Cell::new(None)),
+            extract_n: 8,
+            ffmpeg: sequence::has_ffmpeg(),
             typeset: None,
             palette: cx.new(|cx| CommandPalette::new(window, cx)),
             toaster: cx.new(|_| Toaster::new()),
@@ -426,6 +434,9 @@ impl Darkroom {
             command("Open recipe…").group("Recipe").icon(Icon::Folder).shortcut("Ctrl+Shift+O").on_run(run(|this, _, cx| this.open_recipe(cx))),
             command("Save recipe…").group("Recipe").icon(Icon::File).shortcut("Ctrl+S").on_run(run(|this, _, cx| this.save_recipe(cx))),
             command("Import palette…").group("Recipe").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_palette(cx))),
+            command("Extract palette from the photo").group("Recipe").icon(Icon::Refresh).on_run(run(|this, _, cx| this.extract_palette(cx))),
+            command("Import threshold tile…").group("Recipe").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_tile(cx))),
+            command("Export MP4…").group("File").icon(Icon::File).on_run(run(|this, _, cx| this.export_anim(AnimOut::Mp4, cx))),
             command("Batch develop a folder…").group("File").icon(Icon::Folder).on_run(run(|this, _, cx| this.batch(cx))),
             command("Paste palette").group("Recipe").icon(Icon::Copy).on_run(run(|this, _, cx| this.paste_palette(cx))),
             command("New random seed").group("Develop").icon(Icon::Refresh).on_run(run(|this, _, cx| this.reseed(cx))),
@@ -629,6 +640,51 @@ impl Darkroom {
     fn paste_palette(&mut self, cx: &mut Context<Self>) {
         let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
         self.use_palette(palettes::parse(&text), cx);
+    }
+
+    /// The photo's own palette, by k-means, as the custom palette.
+    fn extract_palette(&mut self, cx: &mut Context<Self>) {
+        let colors = palettes::extract(&self.photo.print().rgb, self.extract_n);
+        let n = colors.len();
+        if n < 2 {
+            self.toast(toast("The photo has only one colour").warning(), cx);
+            return;
+        }
+        self.set_recipe(
+            |r| {
+                r.mode = Mode::Dither;
+                r.palette = palettes::CUSTOM.into();
+                r.colors = colors;
+            },
+            cx,
+        );
+        self.toast(toast("Palette from the photo").success().message(format!("{n} colours")), cx);
+    }
+
+    fn import_tile(&mut self, cx: &mut Context<Self>) {
+        self.ask_path("Import tile", Self::import_tile_path, cx);
+    }
+
+    /// A threshold tile from a small square greyscale picture (up to 16×16):
+    /// darker pixels ink first.
+    fn import_tile_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let tile = image::open(&path).map_err(|e| e.to_string()).and_then(|img| {
+            let img = img.to_luma8();
+            engine::Tile::from_image(&img).ok_or_else(|| format!("a tile is a square picture up to 16×16; this is {}×{}", img.width(), img.height()))
+        });
+        match tile {
+            Ok(tile) => {
+                self.set_recipe(
+                    |r| {
+                        r.algo = Algo::Tile;
+                        r.tile = tile;
+                    },
+                    cx,
+                );
+                self.toast(toast("Tile imported").success().message(format!("{0}×{0}", tile.side)), cx);
+            }
+            Err(why) => self.toast(toast("Couldn't use that tile").danger().message(why), cx),
+        }
     }
 
     fn reseed(&mut self, cx: &mut Context<Self>) {
@@ -872,6 +928,7 @@ impl Darkroom {
             AnimOut::Gif => ("gif", "GIF"),
             AnimOut::Apng => ("png", "APNG"),
             AnimOut::Sheet => ("png", "Sprite sheet"),
+            AnimOut::Mp4 => ("mp4", "MP4"),
         };
         let suffix = if matches!(what, AnimOut::Sheet) { "-sheet" } else { "" };
         let name = format!("{}-{}-{}{suffix}.{ext}", self.stem(), r.algo.key(), r.palette);
@@ -889,6 +946,7 @@ impl Darkroom {
                         AnimOut::Gif => sequence::gif(&arts, &delays, r.scale, r.look()),
                         AnimOut::Apng => sequence::apng(&arts, &delays, r.scale, r.look()),
                         AnimOut::Sheet => sequence::sprite_sheet(&arts, r.scale, r.look()),
+                        AnimOut::Mp4 => sequence::mp4(&arts, &delays, r.scale, r.look()),
                     }
                 })
                 .await;
@@ -1640,16 +1698,42 @@ impl Darkroom {
                     .flex_row()
                     .gap_2()
                     .child(Button::new("import-palette").label("Import…").icon(Icon::Folder).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.import_palette(cx))))
-                    .child(Button::new("paste-palette").label("Paste hex").icon(Icon::Copy).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.paste_palette(cx)))),
+                    .child(Button::new("paste-palette").label("Paste hex").icon(Icon::Copy).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.paste_palette(cx))))
+                    .child(Button::new("extract-palette").label(format!("From photo ({})", self.extract_n)).icon(Icon::Refresh).ghost().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.extract_palette(cx)))),
+            )
+            .child(
+                slider("extract-slider")
+                    .range(2., 32.)
+                    .step(1.)
+                    .value(self.extract_n as f32)
+                    .width(px(220.))
+                    .format(|v| format!("{v:.0} colours from the photo").into())
+                    .on_change(cx.listener(|this, v: &f32, _, cx| {
+                        this.extract_n = *v as usize;
+                        cx.notify();
+                    })),
             )
             .child(div().body(text::SM).text_color(hsla(palette(cx).fg_dim)).child("Lospec .hex, .gpl, .pal, .txt or a palette image; or copy hex colours and paste."))
-            .child(field("match", "Match colours").hint("Oklab compares as the eye does; RGB is cruder and punchier").stacked().child(
-                segmented("match-seg")
-                    .option("Oklab")
-                    .option("RGB")
-                    .selected(if s.recipe.space == Space::Rgb { 1 } else { 0 })
-                    .on_select(cx.listener(|this, i: &usize, window, cx| this.change(|s| s.recipe.space = if *i == 1 { Space::Rgb } else { Space::Oklab }, window, cx))),
-            ))
+            .child(
+                field("match", "Match colours")
+                    .hint("Oklab compares as the eye does; RGB is cruder and punchier; Linear averages real light")
+                    .stacked()
+                    .child(
+                        segmented("match-seg")
+                            .option("Oklab")
+                            .option("RGB")
+                            .option("Linear")
+                            .selected(match s.recipe.space {
+                                Space::Oklab => 0,
+                                Space::Rgb => 1,
+                                Space::Linear => 2,
+                            })
+                            .on_select(cx.listener(|this, i: &usize, _, cx| {
+                                let space = [Space::Oklab, Space::Rgb, Space::Linear][*i];
+                                this.set_recipe(|r| r.space = space, cx)
+                            })),
+                    ),
+            )
     }
 
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1664,7 +1748,7 @@ impl Darkroom {
                 .gap_3()
                 .child(
                     field("algo", "Algorithm")
-                        .hint(if s.recipe.algo.diffuses() { "Error diffusion: each pixel's error carries to its neighbours" } else { "Ordered: a threshold map, stable and tileable" })
+                        .hint(s.recipe.algo.about())
                         .stacked()
                         .child(
                             select("algo-select")
@@ -1707,7 +1791,18 @@ impl Darkroom {
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.reseed(cx))),
                     )
                 })
-                .when(s.recipe.algo.diffuses(), |el| {
+                .when(s.recipe.algo == Algo::Tile, |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(Button::new("import-tile").label("Import tile…").icon(Icon::Folder).secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.import_tile(cx))))
+                            .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(format!("{0}×{0}", s.recipe.tile.side))),
+                    )
+                })
+                .when(s.recipe.algo.has_kernel(), |el| {
                     el.child(
                         switch("serpentine")
                             .label("Serpentine")
@@ -1811,6 +1906,11 @@ impl Darkroom {
                 .child(Button::new("export-sheet").label("Export sprite sheet").icon(Icon::File).secondary().full_width().on_click(cx.listener(
                     |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Sheet, cx),
                 )))
+                .when(self.ffmpeg, |el| {
+                    el.child(Button::new("export-mp4").label("Export MP4").icon(Icon::File).secondary().full_width().on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Mp4, cx),
+                    )))
+                })
                 .child(Button::new("export-frame").label("Export this frame").icon(Icon::File).ghost().full_width().on_click(cx.listener(
                     |this, _: &ClickEvent, window, cx| this.export_png(window, cx),
                 ))),
@@ -1969,7 +2069,7 @@ impl Render for Darkroom {
                 }))
                 .child(if self.loading { spinner("loading").into_any_element() } else { preview })
                 .when(self.photo.path.is_none() && self.view != View::Sheet, |el| {
-                    el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("A sample print. Drop a photo or a GIF here, or open one with Ctrl+O."))
+                    el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("A sample print. Drop a photo, a GIF or a video here, or open one with Ctrl+O."))
                 }),
         )
         .children(timeline.map(|t| div().px_2().pt_2().child(t)));

@@ -10,7 +10,7 @@
 
 use ferrite_design::ascii::{Charset, Fit};
 
-use crate::engine::{Algo, Params, Rgb, Space};
+use crate::engine::{Algo, Params, Rgb, Space, Tile};
 use crate::mask::{self, Kind};
 use crate::palettes;
 use crate::render::{Cells, Look, Paper, Shape};
@@ -72,8 +72,10 @@ pub struct Recipe {
     pub serpentine: bool,
     /// Where colours are matched.
     pub space: Space,
-    /// For the random algorithm.
+    /// For the random and stippling algorithms.
     pub seed: u32,
+    /// For the custom-tile algorithm.
+    pub tile: Tile,
     /// Animations: 0..1, how firmly unchanged pixels hold between frames.
     pub stability: f32,
     /// Animations: playback and export speed, 0.25..4.
@@ -126,6 +128,7 @@ impl Default for Recipe {
             serpentine: true,
             space: Space::Oklab,
             seed: 1,
+            tile: Tile::default(),
             stability: 0.5,
             speed: 1.,
             cols: 160,
@@ -287,8 +290,15 @@ impl Recipe {
             "strength" => self.strength = f(0., 2., self.strength),
             "bias" => self.bias = f(-1., 1., self.bias),
             "serpentine" => self.serpentine = flag(v, self.serpentine),
-            "match" => self.space = if v == "rgb" { Space::Rgb } else { Space::Oklab },
+            "match" => {
+                self.space = match v {
+                    "rgb" => Space::Rgb,
+                    "linear" => Space::Linear,
+                    _ => Space::Oklab,
+                }
+            }
             "seed" => self.seed = v.parse().unwrap_or(self.seed),
+            "tile" => self.tile = Tile::parse(v).unwrap_or(self.tile),
             "stability" => self.stability = f(0., 1., self.stability),
             "speed" => self.speed = f(0.25, 4., self.speed),
             "cols" => self.cols = u(16, 640, self.cols),
@@ -345,8 +355,16 @@ impl Recipe {
             ("strength", bare(format!("{:.2}", self.strength))),
             ("bias", bare(format!("{:.2}", self.bias))),
             ("serpentine", bare(self.serpentine.to_string())),
-            ("match", text(if self.space == Space::Rgb { "rgb" } else { "oklab" })),
+            (
+                "match",
+                text(match self.space {
+                    Space::Rgb => "rgb",
+                    Space::Linear => "linear",
+                    Space::Oklab => "oklab",
+                }),
+            ),
             ("seed", bare(self.seed.to_string())),
+            ("tile", text(&self.tile.text())),
             ("stability", bare(format!("{:.2}", self.stability))),
             ("speed", bare(format!("{:.2}", self.speed))),
             ("cols", bare(self.cols.to_string())),
@@ -457,7 +475,7 @@ impl Recipe {
     }
 
     pub fn params(&self) -> Params {
-        Params { algo: self.algo, strength: self.strength, bias: self.bias, serpentine: self.serpentine, space: self.space, seed: self.seed }
+        Params { algo: self.algo, strength: self.strength, bias: self.bias, serpentine: self.serpentine, space: self.space, seed: self.seed, tile: self.tile }
     }
 }
 
@@ -476,6 +494,7 @@ mod tests {
             serpentine: false,
             space: Space::Rgb,
             seed: 42,
+            tile: Tile::parse("3 1 / 0 2").unwrap(),
             stability: 0.8,
             speed: 1.5,
             cols: 320,

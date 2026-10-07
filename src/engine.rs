@@ -14,6 +14,8 @@
 
 use std::sync::OnceLock;
 
+use crate::algos;
+
 /// An sRGB colour, each channel 0..1.
 pub type Rgb = [f32; 3];
 
@@ -42,10 +44,19 @@ pub enum Algo {
     Atkinson,
     ShiauFan,
     ShiauFan2,
+    Riemersma,
+    DotDiffusion,
+    Knoll,
+    Yliluoma,
+    CmykHalftone,
+    Hatch,
+    Engrave,
+    Stipple,
+    Tile,
 }
 
 impl Algo {
-    pub const ALL: [Algo; 20] = [
+    pub const ALL: [Algo; 29] = [
         Algo::FloydSteinberg,
         Algo::Atkinson,
         Algo::JarvisJudiceNinke,
@@ -57,6 +68,8 @@ impl Algo {
         Algo::FalseFloydSteinberg,
         Algo::ShiauFan,
         Algo::ShiauFan2,
+        Algo::Riemersma,
+        Algo::DotDiffusion,
         Algo::Bayer2,
         Algo::Bayer4,
         Algo::Bayer8,
@@ -64,6 +77,13 @@ impl Algo {
         Algo::BlueNoise,
         Algo::Gradient,
         Algo::Halftone,
+        Algo::CmykHalftone,
+        Algo::Hatch,
+        Algo::Engrave,
+        Algo::Knoll,
+        Algo::Yliluoma,
+        Algo::Stipple,
+        Algo::Tile,
         Algo::Random,
         Algo::Threshold,
     ];
@@ -91,6 +111,15 @@ impl Algo {
             Algo::Atkinson => "atkinson",
             Algo::ShiauFan => "shiau-fan",
             Algo::ShiauFan2 => "shiau-fan-2",
+            Algo::Riemersma => "riemersma",
+            Algo::DotDiffusion => "dot-diffusion",
+            Algo::Knoll => "knoll",
+            Algo::Yliluoma => "yliluoma",
+            Algo::CmykHalftone => "cmyk-halftone",
+            Algo::Hatch => "crosshatch",
+            Algo::Engrave => "engrave",
+            Algo::Stipple => "stipple",
+            Algo::Tile => "tile",
         }
     }
 
@@ -116,6 +145,15 @@ impl Algo {
             Algo::Atkinson => "Atkinson",
             Algo::ShiauFan => "Shiau–Fan",
             Algo::ShiauFan2 => "Shiau–Fan 2",
+            Algo::Riemersma => "Riemersma (Hilbert)",
+            Algo::DotDiffusion => "Dot diffusion",
+            Algo::Knoll => "Knoll pattern",
+            Algo::Yliluoma => "Yliluoma pattern",
+            Algo::CmykHalftone => "CMYK halftone",
+            Algo::Hatch => "Crosshatch",
+            Algo::Engrave => "Engraving lines",
+            Algo::Stipple => "Stippling",
+            Algo::Tile => "Custom tile",
         }
     }
 
@@ -125,7 +163,28 @@ impl Algo {
 
     /// Error diffusion (serial, carries error) rather than a threshold map.
     pub fn diffuses(self) -> bool {
+        self.kernel().is_some() || matches!(self, Algo::Riemersma | Algo::DotDiffusion)
+    }
+
+    /// Diffuses through a kernel scanned row by row (so serpentine applies,
+    /// and frames can hold their pixels).
+    pub fn has_kernel(self) -> bool {
         self.kernel().is_some()
+    }
+
+    /// A short note on what the algorithm is, for the sidebar.
+    pub fn about(self) -> &'static str {
+        match self {
+            Algo::Riemersma => "Error diffusion along a Hilbert curve: no directional streaks",
+            Algo::DotDiffusion => "Knuth's dot diffusion: error passes in a fixed 8×8 order",
+            Algo::Knoll | Algo::Yliluoma => "Pattern dither for many-colour palettes: mixes colours by plan",
+            Algo::CmykHalftone => "Cyan, magenta, yellow and black dots at their own angles; try the 3-bit palette",
+            Algo::Hatch | Algo::Engrave => "Lines that thicken with the dark",
+            Algo::Stipple => "Points spaced by weighted Voronoi relaxation",
+            Algo::Tile => "Your own threshold tile, imported from a small greyscale image",
+            a if a.diffuses() => "Error diffusion: each pixel's error carries to its neighbours",
+            _ => "Ordered: a threshold map, stable and tileable",
+        }
     }
 
     /// `(dx, dy, weight)` taps and their divisor, for error diffusion.
@@ -156,9 +215,19 @@ impl Algo {
 
     /// The threshold, 0..1, an ordered algorithm uses at `(x, y)`.
     #[allow(clippy::excessive_precision)]
-    fn threshold(self, x: u32, y: u32, seed: u32) -> f32 {
+    fn threshold(self, x: u32, y: u32, p: &Params) -> f32 {
+        // Line screens: 0 at a line's centre, 1 midway between lines.
+        let line = |angle: f32, period: f32| {
+            let (s, c) = angle.to_radians().sin_cos();
+            let t = ((x as f32 + 0.5) * c + (y as f32 + 0.5) * s) / period;
+            (t.rem_euclid(1.) - 0.5).abs() * 2.
+        };
         match self {
-            Algo::Random => hash01(x, y, seed),
+            Algo::Random => hash01(x, y, p.seed),
+            // Lines are the dark: a pixel lights only past its line distance.
+            Algo::Hatch => 1. - line(45., 6.).min(0.5 + 0.5 * line(-45., 6.)),
+            Algo::Engrave => 1. - line(-30., 5.),
+            Algo::Tile => p.tile.threshold(x, y),
             Algo::Bayer2 => bayer(1, x, y),
             Algo::Bayer4 => bayer(2, x, y),
             Algo::Bayer8 => bayer(3, x, y),
@@ -265,6 +334,85 @@ pub fn from_oklab([l, a, b]: [f32; 3]) -> Rgb {
 pub enum Space {
     Oklab,
     Rgb,
+    /// Linear light: error is carried in physical light, so a dither's
+    /// average matches the photo's real brightness.
+    Linear,
+}
+
+/// A custom threshold tile: each cell's rank, 0 first, up to 16×16.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tile {
+    pub side: u8,
+    pub rank: [u8; 256],
+}
+
+impl Default for Tile {
+    /// A 4×4 diagonal-line tile, until one is imported.
+    fn default() -> Self {
+        Tile::from_values(4, &[0., 8., 12., 4., 9., 13., 5., 1., 14., 6., 2., 10., 7., 3., 11., 15.]).expect("a valid tile")
+    }
+}
+
+impl Tile {
+    /// Rank `side`×`side` values, smallest first (ties keep their order).
+    pub fn from_values(side: usize, values: &[f32]) -> Option<Tile> {
+        if !(1..=16).contains(&side) || values.len() != side * side {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..values.len()).collect();
+        order.sort_by(|&a, &b| values[a].total_cmp(&values[b]).then(a.cmp(&b)));
+        let mut rank = [0u8; 256];
+        for (r, &i) in order.iter().enumerate() {
+            rank[i] = r as u8;
+        }
+        Some(Tile { side: side as u8, rank })
+    }
+
+    /// From text: rows of numbers, rows separated by `/` or new lines.
+    pub fn parse(text: &str) -> Option<Tile> {
+        let rows: Vec<Vec<f32>> = text
+            .split(['/', '\n'])
+            .map(|r| r.split([' ', ',', '\t']).filter(|v| !v.is_empty()).map(|v| v.parse::<f32>()).collect::<Result<Vec<_>, _>>())
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?
+            .into_iter()
+            .filter(|r| !r.is_empty())
+            .collect();
+        let side = rows.len();
+        if rows.iter().any(|r| r.len() != side) {
+            return None;
+        }
+        Tile::from_values(side, &rows.concat())
+    }
+
+    /// From a small greyscale picture: dark pixels ink first.
+    pub fn from_image(img: &image::GrayImage) -> Option<Tile> {
+        let side = img.width() as usize;
+        if img.height() as usize != side {
+            return None;
+        }
+        Tile::from_values(side, &img.pixels().map(|p| p.0[0] as f32).collect::<Vec<_>>())
+    }
+
+    pub fn text(&self) -> String {
+        let n = self.side as usize;
+        (0..n).map(|y| (0..n).map(|x| self.rank[y * n + x].to_string()).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" / ")
+    }
+
+    fn threshold(&self, x: u32, y: u32) -> f32 {
+        let n = self.side.max(1) as u32;
+        (self.rank[((y % n) * n + x % n) as usize] as f32 + 0.5) / (n * n) as f32
+    }
+}
+
+fn linear(c: Rgb) -> Rgb {
+    c.map(to_linear)
+}
+
+/// The luminance a colour is lit by, in linear light.
+fn linear_luma(c: Rgb) -> f32 {
+    let [r, g, b] = linear(c);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
 /// Everything about a dither except the picture and the palette.
@@ -281,13 +429,15 @@ pub struct Params {
     /// Error diffusion runs alternate rows right to left.
     pub serpentine: bool,
     pub space: Space,
-    /// For [`Algo::Random`].
+    /// For [`Algo::Random`] and [`Algo::Stipple`].
     pub seed: u32,
+    /// For [`Algo::Tile`].
+    pub tile: Tile,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { algo: Algo::FloydSteinberg, strength: 1., bias: 0., serpentine: true, space: Space::Oklab, seed: 1 }
+        Params { algo: Algo::FloydSteinberg, strength: 1., bias: 0., serpentine: true, space: Space::Oklab, seed: 1, tile: Tile::default() }
     }
 }
 
@@ -331,8 +481,13 @@ pub fn dither_held(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params, h
         return vec![0; n];
     }
     let pal_lab: Vec<[f32; 3]> = palette.iter().map(|&c| oklab(c)).collect();
+    if p.algo == Algo::CmykHalftone {
+        // Screened inks mix to one of eight colours; take the nearest of ours.
+        let mixed = algos::cmyk(pixels, w, 3. + 5. * p.strength.clamp(0., 2.));
+        return mixed.iter().map(|&c| nearest_lab(&pal_lab, oklab(c)) as u8).collect();
+    }
     if palette.len() == 2 {
-        return duotone(pixels, w, h, &pal_lab, p, hold);
+        return duotone(pixels, w, h, &pal_lab, palette, p, hold);
     }
 
     // Fit the picture's lightness into the palette's, so a palette with no
@@ -346,13 +501,14 @@ pub fn dither_held(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params, h
     let (mut work, pal): (Vec<[f32; 3]>, Vec<[f32; 3]>) = match p.space {
         Space::Oklab => (fitted.collect(), pal_lab),
         Space::Rgb => (fitted.map(from_oklab).collect(), palette.to_vec()),
+        Space::Linear => (fitted.map(|c| linear(from_oklab(c))).collect(), palette.iter().map(|&c| linear(c)).collect()),
     };
     // The bias nudges which colour is picked, not the value carried on.
     let lean = p.bias * BIAS_REACH * (hi - lo).max(0.05);
     let nearest = |v: [f32; 3]| -> usize {
         let v = match p.space {
             Space::Oklab => [v[0] + lean, v[1], v[2]],
-            Space::Rgb => [v[0] + lean, v[1] + lean, v[2] + lean],
+            Space::Rgb | Space::Linear => [v[0] + lean, v[1] + lean, v[2] + lean],
         };
         let mut best = (0, f32::MAX);
         for (i, c) in pal.iter().enumerate() {
@@ -363,6 +519,27 @@ pub fn dither_held(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params, h
         }
         best.0
     };
+
+    let luma = |v: [f32; 3]| match p.space {
+        Space::Oklab => v[0],
+        Space::Rgb | Space::Linear => 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2],
+    };
+    match p.algo {
+        Algo::Riemersma => return algos::riemersma(&work, w, h, &pal, &nearest, p.strength),
+        Algo::DotDiffusion => return algos::dot_diffusion(&work, w, h, &pal, &nearest, p.strength),
+        Algo::Knoll => return algos::knoll(&work, w, &pal, &nearest, &luma, p.strength),
+        Algo::Yliluoma => return algos::yliluoma(&work, w, &pal, &luma),
+        Algo::Stipple => {
+            // Points where the picture is light (as in a duotone, light is ink);
+            // the rest is the darkest colour.
+            let (dmin, dmax) = pal.iter().fold((f32::MAX, f32::MIN), |(a, b), &c| (a.min(luma(c)), b.max(luma(c))));
+            let level: Vec<f32> = work.iter().map(|&v| ((luma(v) - dmin) / (dmax - dmin).max(1e-3)).clamp(0., 1.)).collect();
+            let dark = (0..pal.len()).min_by(|&a, &b| luma(pal[a]).total_cmp(&luma(pal[b]))).unwrap_or(0) as u8;
+            let points = algos::stipple(&level, w, h, p.seed);
+            return points.iter().zip(&work).map(|(&on, &v)| if on { nearest(v) as u8 } else { dark }).collect();
+        }
+        _ => {}
+    }
 
     if let Some((taps, div)) = p.algo.kernel() {
         let d2 = |a: [f32; 3], b: [f32; 3]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
@@ -410,22 +587,50 @@ pub fn dither_held(pixels: &[Rgb], w: u32, h: u32, palette: &[Rgb], p: Params, h
         .enumerate()
         .map(|(i, &v)| {
             let (x, y) = (i as u32 % w, i as u32 / w);
-            let o = if ordered { (p.algo.threshold(x, y, p.seed) - 0.5) * spread } else { 0. };
+            let o = if ordered { (p.algo.threshold(x, y, &p) - 0.5) * spread } else { 0. };
             let v = match p.space {
                 Space::Oklab => [v[0] + o, v[1], v[2]],
-                Space::Rgb => [v[0] + o, v[1] + o, v[2] + o],
+                Space::Rgb | Space::Linear => [v[0] + o, v[1] + o, v[2] + o],
             };
             nearest(v) as u8
         })
         .collect()
 }
 
+fn nearest_lab(pal: &[[f32; 3]], v: [f32; 3]) -> usize {
+    (0..pal.len())
+        .min_by(|&a, &b| {
+            let d = |c: [f32; 3]| (c[0] - v[0]).powi(2) + (c[1] - v[1]).powi(2) + (c[2] - v[2]).powi(2);
+            d(pal[a]).total_cmp(&d(pal[b]))
+        })
+        .unwrap_or(0)
+}
+
 /// Two colours: dither the lightness between them as a single level, which
-/// keeps the full tonal range whatever the two colours are.
-fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params, hold: Option<&Hold>) -> Vec<u8> {
+/// keeps the full tonal range whatever the two colours are. In linear light
+/// the level is the physical luminance, so the dot density averages to the
+/// photo's real brightness.
+fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], palette: &[Rgb], p: Params, hold: Option<&Hold>) -> Vec<u8> {
     let (dark, light) = if pal[0][0] <= pal[1][0] { (0u8, 1u8) } else { (1, 0) };
-    let mut level: Vec<f32> = pixels.iter().map(|&c| oklab(c)[0].clamp(0., 1.)).collect();
+    let _ = palette;
+    let mut level: Vec<f32> = match p.space {
+        Space::Linear => pixels.iter().map(|&c| linear_luma(c).clamp(0., 1.)).collect(),
+        _ => pixels.iter().map(|&c| oklab(c)[0].clamp(0., 1.)).collect(),
+    };
     let cut = 0.5 - p.bias * BIAS_REACH;
+    // The special algorithms see the level as a one-channel vector.
+    let pal1 = [[0., 0., 0.], [1., 0., 0.]];
+    let near1 = |v: [f32; 3]| usize::from(v[0] > cut);
+    let to_index = |i: usize| if i == 1 { light } else { dark };
+    let work1 = || level.iter().map(|&v| [v, 0., 0.]).collect::<Vec<_>>();
+    match p.algo {
+        Algo::Riemersma => return algos::riemersma(&work1(), w, h, &pal1, &near1, p.strength).into_iter().map(|i| to_index(i as usize)).collect(),
+        Algo::DotDiffusion => return algos::dot_diffusion(&work1(), w, h, &pal1, &near1, p.strength).into_iter().map(|i| to_index(i as usize)).collect(),
+        Algo::Knoll => return algos::knoll(&work1(), w, &pal1, &near1, &|v| v[0], p.strength).into_iter().map(|i| to_index(i as usize)).collect(),
+        Algo::Yliluoma => return algos::yliluoma(&work1(), w, &pal1, &|v| v[0]).into_iter().map(|i| to_index(i as usize)).collect(),
+        Algo::Stipple => return algos::stipple(&level, w, h, p.seed).into_iter().map(|on| if on { light } else { dark }).collect(),
+        _ => {}
+    }
     if let Some((taps, div)) = p.algo.kernel() {
         let mut out = vec![dark; level.len()];
         let (wi, hi) = (w as i32, h as i32);
@@ -460,7 +665,7 @@ fn duotone(pixels: &[Rgb], w: u32, h: u32, pal: &[[f32; 3]], p: Params, hold: Op
         .enumerate()
         .map(|(i, &v)| {
             let (x, y) = (i as u32 % w, i as u32 / w);
-            let t = cut + (p.algo.threshold(x, y, p.seed) - 0.5) * p.strength.min(1.);
+            let t = cut + (p.algo.threshold(x, y, &p) - 0.5) * p.strength.min(1.);
             if v > t { light } else { dark }
         })
         .collect()
@@ -597,6 +802,41 @@ mod tests {
         let fs = dither(&px, w, h, &BW, Params { bias: 0.5, ..Params::default() });
         let share = fs.iter().filter(|v| **v == 1).count() as f32 / fs.len() as f32;
         assert!((share - 0.6).abs() < 0.1, "{share}");
+    }
+
+    #[test]
+    fn tiles_parse_and_rank() {
+        let t = Tile::parse("10 20 / 40 30").unwrap();
+        assert_eq!((t.side, &t.rank[..4]), (2, &[0u8, 1, 3, 2][..]));
+        assert_eq!(Tile::parse(&t.text()), Some(t));
+        assert!(Tile::parse("1 2 / 3").is_none());
+        assert!(Tile::parse("x").is_none());
+        let img = image::GrayImage::from_raw(2, 2, vec![200, 0, 100, 50]).unwrap();
+        assert_eq!(&Tile::from_image(&img).unwrap().rank[..4], &[3, 0, 2, 1]);
+    }
+
+    #[test]
+    fn linear_light_lights_fewer_pixels_for_mid_grey() {
+        // sRGB 0.5 is about 21% of white's light: in linear light a 50%
+        // grey gets far fewer lit pixels than its Oklab lightness suggests.
+        let (w, h) = (64, 64);
+        let px = vec![[0.5f32; 3]; (w * h) as usize];
+        let lit = |space| dither(&px, w, h, &BW, Params { space, ..Params::default() }).iter().filter(|v| **v == 1).count() as f32 / (w * h) as f32;
+        let (perceptual, physical) = (lit(Space::Oklab), lit(Space::Linear));
+        assert!((physical - 0.214).abs() < 0.04, "{physical}");
+        assert!(perceptual > physical + 0.2, "{perceptual}");
+    }
+
+    #[test]
+    fn many_colour_patterns_mix_the_palette() {
+        // A purple between red and blue: pattern dithers alternate the two.
+        let pal = [[1., 0., 0.], [0., 0., 1.], [0., 0., 0.], [1., 1., 1.]];
+        let px = vec![[0.5, 0., 0.5]; 64];
+        for algo in [Algo::Knoll, Algo::Yliluoma] {
+            let out = dither(&px, 8, 8, &pal, Params { algo, ..Params::default() });
+            let (red, blue) = (out.iter().filter(|v| **v == 0).count(), out.iter().filter(|v| **v == 1).count());
+            assert!(red > 10 && blue > 10, "{algo:?}: {red} red, {blue} blue");
+        }
     }
 
     #[test]

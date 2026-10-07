@@ -191,9 +191,17 @@ Progress is marked inline: ✅ done, everything else still to do.
    PNG export; ✅ ASCII film (HTML). *Not done:* sextants (no common font
    draws them yet). Original scope: Glyph-shape matching on PxPlus CP437,
    braille, blocks, colour ASCII, ANSI/HTML/SVG export, ASCII film.
-6. **0.7: the long tail.** Halftone screens with CMYK angles, Riemersma,
-   dot diffusion, Yliluoma, Knoll, Ostromoukhov, stippling, hatching,
-   custom tiles, palette extraction; video and webcam via ffmpeg.
+6. **0.7: the long tail.** ✅ CMYK halftone with screen angles,
+   ✅ Riemersma, ✅ dot diffusion, ✅ Yliluoma, ✅ Knoll, ✅ stippling
+   (weighted Voronoi), ✅ crosshatch and engraving lines, ✅ custom tiles,
+   ✅ palette extraction (k-means in Oklab), ✅ linear-light matching (from
+   0.2), ✅ video in and MP4 out via ffmpeg. *Skipped:* Ostromoukhov (it
+   rests on a published 256-entry coefficient table, which shouldn't be
+   reproduced from memory), webcam capture (platform-specific capture that
+   can't be verified here). Original scope: Halftone screens with CMYK
+   angles, Riemersma, dot diffusion, Yliluoma, Knoll, Ostromoukhov,
+   stippling, hatching, custom tiles, palette extraction; video and webcam
+   via ffmpeg.
 7. **1.0** when the reference images can each be reproduced from a
    bundled recipe in under a minute.
 

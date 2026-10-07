@@ -25,7 +25,7 @@ pub struct Job {
 pub type Outcome = (Vec<PathBuf>, Vec<(PathBuf, String)>);
 
 /// The files a folder batch picks up.
-const INPUTS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "apng"];
+const INPUTS: [&str; 14] = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "apng", "mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg"];
 
 impl Job {
     /// The scheme's colours by key and appearance, without a window.
@@ -55,11 +55,12 @@ impl Job {
         let adjust = self.adjust();
         let colors = r.palette_colors(self.paper, self.ink);
         let bytes = match ext.as_str() {
-            "gif" | "png" | "apng" => {
+            "gif" | "png" | "apng" | "mp4" => {
                 let arts = sequence::develop_all(&clip.frames, r, adjust, &colors, self.paint.as_ref());
                 let delays = sequence::delays(&clip.frames, r.speed);
                 match ext.as_str() {
                     "gif" => sequence::gif(&arts, &delays, r.scale, r.look())?,
+                    "mp4" => sequence::mp4(&arts, &delays, r.scale, r.look())?,
                     _ if clip.is_animated() => sequence::apng(&arts, &delays, r.scale, r.look())?,
                     _ => render::png(&arts[0], r.scale, r.look())?,
                 }
@@ -81,8 +82,8 @@ impl Job {
                 }
                 .into_bytes()
             }
-            "" => return Err(format!("{} has no extension; use .png, .gif, .txt, .ans, .html or .svg", output.display())),
-            other => return Err(format!(".{other} isn't an output Darkroom makes; use .png, .gif, .txt, .ans, .html or .svg")),
+            "" => return Err(format!("{} has no extension; use .png, .gif, .mp4, .txt, .ans, .html or .svg", output.display())),
+            other => return Err(format!(".{other} isn't an output Darkroom makes; use .png, .gif, .mp4, .txt, .ans, .html or .svg")),
         };
         if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
