@@ -112,9 +112,11 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 - **Recipes.** Everything about how a print develops (algorithm, palette,
   tone, sizes) saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
   Open one (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>, or drop it on the
-  print) to develop any photo the same way. Seven come in `recipes/`:
-  Game Boy, newsprint halftone, a seven-colour sunset, an engraving, a dot
-  lattice, a cut-out in cobalt ink, and a solid subject on a lattice.
+  print) to develop any photo the same way. Nine come built in, one click
+  each from the Recipes row: Cut-out (a subject on a plain backdrop, in
+  one ink on clean paper), Lattice (a solid figure on a grid of dots),
+  Dots, Newsprint, CMYK print, Engraving, Game Boy, Sunset and Braille.
+  Their files are in `recipes/`.
 - **Export.** A PNG in the palette's exact colours at 1×, 2×, 4× or 8× pixel size
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), the ASCII as a text file
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd>), or the ASCII copied to the

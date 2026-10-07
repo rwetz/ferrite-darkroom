@@ -1,0 +1,9 @@
+# A Darkroom recipe: the photo as braille text, eight Atkinson-dithered dots
+# a character, in the photo's own colours. Copy it, or export ANSI to see
+# the colour in a terminal.
+mode = "ascii"
+glyphs = "braille"
+ascii_colour = "photo"
+algorithm = "atkinson"
+ascii_cols = 100
+contrast = 1.20

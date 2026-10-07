@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-darkroom"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "ferrite-design",
  "gif",

@@ -1,7 +1,7 @@
 [package]
 name = "ferrite-darkroom"
-version = "0.1.1"
-description = "A Ferrite dither studio: turn a photo into pixel art or ASCII with twenty dither algorithms and retro palettes, and export PNG or text."
+version = "1.0.0"
+description = "A Ferrite dither and text-art studio: photos, GIFs and video into pixel art, braille or ASCII, in twenty-nine algorithms and any palette."
 authors = ["Ryan Wetzstein"]
 license = "Apache-2.0"
 repository = "https://github.com/rwetz/ferrite-darkroom"

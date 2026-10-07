@@ -16,6 +16,20 @@ use crate::palettes;
 use crate::render::{Cells, Look, Paper, Shape};
 use crate::textart::{Glyphs, Tint};
 
+/// The recipes that come with Darkroom (`recipes/`), built in so each is
+/// one click from any photo: `(name, recipe file)`.
+pub const BUNDLED: [(&str, &str); 9] = [
+    ("Cut-out", include_str!("../recipes/cutout.toml")),
+    ("Lattice", include_str!("../recipes/lattice.toml")),
+    ("Dots", include_str!("../recipes/dots.toml")),
+    ("Newsprint", include_str!("../recipes/newsprint.toml")),
+    ("CMYK print", include_str!("../recipes/cmyk-print.toml")),
+    ("Engraving", include_str!("../recipes/engraving.toml")),
+    ("Game Boy", include_str!("../recipes/gameboy.toml")),
+    ("Sunset", include_str!("../recipes/sunset.toml")),
+    ("Braille", include_str!("../recipes/braille.toml")),
+];
+
 /// What the background layer (where the mask isn't) becomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Background {
@@ -581,6 +595,20 @@ mod tests {
         // Notepad and PowerShell write one; the first key must still count.
         let r = Recipe::from_toml("\u{feff}algorithm = \"bayer-8\"\n").unwrap();
         assert_eq!(r.algo, Algo::Bayer8);
+    }
+
+    #[test]
+    fn every_bundled_recipe_loads_and_differs() {
+        let all: Vec<Recipe> = BUNDLED.iter().map(|(name, src)| Recipe::from_toml(src).unwrap_or_else(|e| panic!("{name}: {e}"))).collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        let cmyk = &all[4];
+        assert_eq!((cmyk.algo, cmyk.palette.as_str()), (Algo::CmykHalftone, "3-bit"));
+        let braille = &all[8];
+        assert_eq!((braille.mode, braille.glyphs, braille.ascii_tint), (Mode::Ascii, crate::textart::Glyphs::Braille, crate::textart::Tint::Photo));
     }
 
     #[test]

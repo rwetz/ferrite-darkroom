@@ -376,6 +376,78 @@ mod tests {
         assert!(painted.layer.iter().all(|l| *l == 1));
     }
 
+    /// A dark, shaded figure on an off-white backdrop: the shape of the
+    /// reference images (an engraved knight, a photographed hand).
+    fn figure() -> Print {
+        let (w, h) = (160u32, 160u32);
+        let rgb = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+                let d = ((x - 0.5).powi(2) + (y - 0.55).powi(2)).sqrt();
+                if d < 0.28 {
+                    let shade = 0.15 + 0.5 * (x + y) / 2.;
+                    [shade * 0.8, shade * 0.85, shade]
+                } else {
+                    [0.96, 0.95, 0.93]
+                }
+            })
+            .collect();
+        Print::from_rgb(w, h, rgb)
+    }
+
+    fn bundled(name: &str) -> Recipe {
+        let src = crate::recipe::BUNDLED.iter().find(|(n, _)| *n == name).unwrap().1;
+        Recipe::from_toml(src).unwrap()
+    }
+
+    #[test]
+    fn reference_cutout_is_one_ink_on_clean_paper() {
+        let r = bundled("Cut-out");
+        let colors = r.palette_colors(PAPER, INK);
+        let art = develop_recipe(&figure(), &r, Adjust { brightness: r.brightness, contrast: r.contrast, gamma: r.gamma, invert: r.invert, light_ink: false }, colors.clone(), None, None);
+        let paper = render::paper_index(&colors, r.paper) as u8;
+        let (w, h) = (art.w as usize, art.h as usize);
+        // The backdrop is bare paper all round: the corners and edges.
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (w / 2, 0)] {
+            assert_eq!(art.index[y * w + x], paper, "backdrop at ({x}, {y})");
+        }
+        // The figure is drawn in the ink, densely.
+        let core: Vec<u8> = (h / 2 - 10..h / 2 + 10).flat_map(|y| (w / 2 - 10..w / 2 + 10).map(move |x| (x, y))).map(|(x, y)| art.index[y * w + x]).collect();
+        let inked = core.iter().filter(|&&i| i != paper).count();
+        assert!(inked * 2 > core.len(), "{inked} of {}", core.len());
+        // Two colours only: paper and one ink.
+        assert_eq!(colors.len(), 2);
+    }
+
+    #[test]
+    fn reference_lattice_is_a_solid_figure_on_a_regular_grid() {
+        let r = bundled("Lattice");
+        let colors = r.palette_colors(PAPER, INK);
+        let adjust = Adjust { brightness: r.brightness, contrast: r.contrast, gamma: r.gamma, invert: r.invert, light_ink: true };
+        let art = develop_recipe(&figure(), &r, adjust, colors.clone(), None, None);
+        let (w, h) = (art.w as usize, art.h as usize);
+        // The backdrop is a regular lattice: it repeats every four pixels,
+        // and it is neither empty nor solid.
+        // A near-white backdrop lights one pixel in each 4×4, so look at a
+        // band four rows deep.
+        let band = h / 8..h / 8 + 4;
+        for y in band.clone() {
+            let bg: Vec<u8> = (0..w).map(|x| art.index[y * w + x]).collect();
+            assert!((0..w - 4).all(|x| bg[x] == bg[x + 4]), "row {y}: {bg:?}");
+        }
+        let cells: Vec<u8> = band.clone().flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| art.index[y * w + x]).collect();
+        assert!(cells.contains(&0) && cells.contains(&1));
+        let (lx, row) = band.clone().flat_map(|y| (0..w).map(move |x| (x, y))).find(|&(x, y)| art.index[y * w + x] == 1).unwrap();
+        // The figure is one solid colour (the threshold puts it all on one side).
+        let centre = art.index[(h / 2) * w + w / 2];
+        assert!((h / 2 - 5..h / 2 + 5).all(|y| (w / 2 - 5..w / 2 + 5).all(|x| art.index[y * w + x] == centre)));
+        // And drawn with the lattice's gutter, it renders as separate dots.
+        let (pw, _, px) = render::rgba(&art, 6, r.look());
+        let lit = |x: usize, y: usize| px[(y * pw as usize + x) * 4] > 128;
+        let (cx, cy) = (lx * 6, row * 6);
+        assert!(lit(cx + 3, cy + 3) && !lit(cx, cy), "a dot with a gap around it");
+    }
+
     #[test]
     fn ascii_has_the_width_asked_for() {
         let lines = ascii_lines(&sample(), 60, Adjust::default(), Charset::Classic, Fit::Tone);

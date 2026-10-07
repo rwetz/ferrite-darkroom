@@ -488,6 +488,12 @@ impl Darkroom {
             command("Dark theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "dark".into(), window, cx))),
             command("Light theme").group("Theme").on_run(run(|this, window, cx| this.change(|s| s.appearance = "light".into(), window, cx))),
         ];
+        for (i, (name, _)) in recipe::BUNDLED.iter().enumerate() {
+            let weak = weak.clone();
+            commands.push(command(format!("Recipe: {name}")).group("Recipe").on_run(move |_, cx| {
+                let _ = weak.update(cx, |this, cx| this.use_bundled(i, cx));
+            }));
+        }
         for algo in Algo::ALL {
             let weak = weak.clone();
             commands.push(command(format!("Algorithm: {}", algo.name())).group("Develop").on_run(move |window, cx| {
@@ -605,6 +611,18 @@ impl Darkroom {
                 self.toast(toast("Recipe applied").success().message(name), cx);
             }
             Err(why) => self.toast(toast("Couldn't open that recipe").danger().message(why), cx),
+        }
+    }
+
+    /// Apply one of the recipes that come with Darkroom.
+    fn use_bundled(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some((name, src)) = recipe::BUNDLED.get(i) else { return };
+        match Recipe::from_toml(src) {
+            Ok(r) => {
+                self.set_recipe(|cur| *cur = r, cx);
+                self.toast(toast("Recipe applied").success().message(*name), cx);
+            }
+            Err(why) => self.toast(toast("Couldn't use that recipe").danger().message(why), cx),
         }
     }
 
@@ -1951,6 +1969,9 @@ impl Darkroom {
                 )),
         };
 
+        let recipes = recipe::BUNDLED.iter().enumerate().map(|(i, (name, _))| {
+            Button::new(("recipe", i)).label(*name).small().secondary().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.use_bundled(i, cx)))
+        });
         panel("Develop").w(px(SIDEBAR)).flex_none().min_h_0().child(
             scroll_area("develop-scroll").flex_1().min_h_0().child(
                 div()
@@ -1958,6 +1979,12 @@ impl Darkroom {
                     .flex_col()
                     .gap_4()
                     .p_2()
+                    .child(
+                        field("recipes", "Recipes")
+                            .hint("A look in one click; tune it after, save your own with Ctrl+S")
+                            .stacked()
+                            .child(div().flex().flex_row().flex_wrap().gap_1().children(recipes)),
+                    )
                     .child(
                         segmented("mode-seg")
                             .option("Dither")
