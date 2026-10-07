@@ -1063,6 +1063,9 @@ impl Darkroom {
     }
 
     fn export_anim(&mut self, what: AnimOut, cx: &mut Context<Self>) {
+        if self.settings.recipe.mode == Mode::Ascii {
+            return self.export_text_anim(what, cx);
+        }
         let key = self.reel_key(cx);
         let ready = self.reel.as_ref().filter(|(k, _)| *k == key).map(|(_, arts)| arts.clone());
         let clip = self.photo.clip.clone();
@@ -1091,6 +1094,39 @@ impl Darkroom {
                         AnimOut::Apng => sequence::apng(&arts, &delays, to, r.scale, r.look()),
                         AnimOut::Sheet => sequence::sprite_sheet(&arts, to, r.scale, r.look()),
                         AnimOut::Mp4 => sequence::mp4(&arts, &delays, to, r.scale, r.look()),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match bytes {
+                Ok(bytes) => this.save_as(name, bytes, label, cx),
+                Err(why) => this.toast(toast(format!("Couldn't make the {label}")).danger().message(why), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// An animation's text art as a GIF, APNG or MP4: every frame typeset,
+    /// then drawn and encoded in the background.
+    fn export_text_anim(&mut self, what: AnimOut, cx: &mut Context<Self>) {
+        let frames = self.typeset_all(cx);
+        let delays = sequence::delays(&self.photo.clip.frames, self.settings.recipe.speed);
+        let (size, frame, scale) = (self.settings.size, self.settings.frame, self.settings.recipe.scale);
+        let (ext, label): (&str, &'static str) = match what {
+            AnimOut::Gif => ("gif", "GIF"),
+            AnimOut::Mp4 => ("mp4", "MP4"),
+            AnimOut::Apng | AnimOut::Sheet => ("png", "APNG"),
+        };
+        let name = format!("{}-ascii.{ext}", self.stem());
+        self.toast(toast(format!("Making the {label}…")).message(format!("{} frames", frames.len())), cx);
+        cx.spawn(async move |this, cx| {
+            let bytes = cx
+                .background_executor()
+                .spawn(async move {
+                    let draw = |i: usize| frames[i].rgba(size, frame, scale);
+                    match what {
+                        AnimOut::Gif => sequence::gif_rgba(frames.len(), &delays, draw),
+                        AnimOut::Mp4 => sequence::mp4_rgba(frames.len(), &delays, draw),
+                        AnimOut::Apng | AnimOut::Sheet => sequence::apng_rgba(frames.len(), &delays, draw),
                     }
                 })
                 .await;
@@ -2280,13 +2316,30 @@ impl Darkroom {
                 .flex_col()
                 .gap_2()
                 .when(animated, |el| {
-                    el.child(Button::new("export-film").label("Export ASCII film").icon(Icon::File).primary().full_width().on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| this.export_film(cx)),
-                    ))
+                    el.child(Button::new("export-tgif").label("Export GIF").icon(Icon::File).primary().full_width().shortcut("Ctrl+E").on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Gif, cx),
+                    )))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(Button::new("export-tapng").label("APNG").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Apng, cx))))
+                            .when(self.ffmpeg, |el| {
+                                el.child(Button::new("export-tmp4").label("MP4").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_anim(AnimOut::Mp4, cx))))
+                            })
+                            .child(Button::new("export-film").label("ASCII film").secondary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_film(cx)))),
+                    )
                 })
-                .child(Button::new("export-still").label(format!("Export {}", s.format.name())).icon(Icon::File).primary().full_width().shortcut("Ctrl+E").loading(self.exporting).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| this.export_still(cx),
-                )))
+                .child({
+                    let still = Button::new("export-still").icon(Icon::File).full_width().loading(self.exporting).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.export_still(cx)));
+                    if animated {
+                        still.label(format!("Export this frame as {}", s.format.name())).ghost()
+                    } else {
+                        still.label(format!("Export {}", s.format.name())).primary().shortcut("Ctrl+E")
+                    }
+                })
                 .child(Button::new("export-text").label("Export text").icon(Icon::File).secondary().full_width().shortcut("Ctrl+Shift+E").on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.export_text(cx)),
                 ))
@@ -2483,7 +2536,7 @@ impl Render for Darkroom {
                 .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
                 .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
                 .on_action(cx.listener(|this, _: &ExportPng, _, cx| {
-                    if this.photo.frames() > 1 && this.settings.recipe.mode == Mode::Dither {
+                    if this.photo.frames() > 1 {
                         this.export_anim(AnimOut::Gif, cx)
                     } else {
                         this.export_still(cx)

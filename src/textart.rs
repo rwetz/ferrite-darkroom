@@ -516,12 +516,17 @@ impl TextArt {
         if format == crate::export::Format::Svg {
             return Ok(self.svg().into_bytes());
         }
+        let (w, h, px) = self.rgba(size, frame, scale);
+        crate::export::encode(w, h, px, format, self.paper)
+    }
+
+    /// The art's pixels at `size` in `frame`: RGBA, padded with paper.
+    pub fn rgba(&self, size: crate::export::Size, frame: crate::export::Frame, scale: u32) -> (u32, u32, Vec<u8>) {
         let (nw, nh) = self.native();
         let ((w, h), rect) = frame.canvas(nw, nh, size, scale);
         let (_, _, px) = self.raster_sized(rect[2], rect[3]);
         let [r, g, b] = rgb8(self.paper);
-        let px = crate::export::place(px, (w, h), rect, [r, g, b, 255]);
-        crate::export::encode(w, h, px, format, self.paper)
+        (w, h, crate::export::place(px, (w, h), rect, [r, g, b, 255]))
     }
 }
 
