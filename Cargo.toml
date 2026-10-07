@@ -12,7 +12,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
-ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "ebf7ee99f6265fc81875f0c798aba8a4e306e160" }
+ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "0b13d8087942fd4dc65c2a62ef19bdf60f7547e7" }
 # Must match ferrite-design exactly (PITFALLS §1).
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8" }

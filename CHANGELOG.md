@@ -6,6 +6,10 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
+- The window reopens at the size, place and state it was closed in, and
+  the first one fits the screen. The selects in the Develop panel open
+  above any drawer (ferrite-design).
+
 The 0.2 milestone in [the roadmap](docs/ROADMAP.md): algorithms, palettes
 and recipes.
 

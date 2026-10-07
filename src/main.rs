@@ -938,9 +938,10 @@ fn main() {
             KeyBinding::new("ctrl-shift-c", CopyText, None),
             KeyBinding::new("ctrl-i", Invert, None),
         ]);
-        let options = chrome::window_options("Darkroom", size(px(1180.), px(780.)), cx);
+        let options = chrome::remembered_window_options("darkroom", "Darkroom", size(px(1180.), px(780.)), cx);
         cx.open_window(options, |window, cx| {
             chrome::square_corners(window);
+            chrome::remember_window("darkroom", window, cx);
             chrome::power_off_on_close(window, cx);
             cx.new(|cx| Darkroom::new(window, cx))
         })
