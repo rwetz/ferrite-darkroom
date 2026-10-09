@@ -475,10 +475,19 @@ impl Darkroom {
             toaster: cx.new(|_| Toaster::new()),
             _appearance: theme::follow_system(window),
         };
+        // Shared launch defaults apply until this app has saved its own preferences.
         room.apply_look(window, cx);
-        // Lodestone hands over its shared look as FERRITE_* variables; when
-        // launched that way, those win over the saved settings.
         theme::apply_env(cx);
+        if Settings::path().is_some_and(|path| path.exists()) {
+            room.apply_look(window, cx);
+        } else {
+            room.settings.scheme = theme::scheme(cx).key.into();
+            room.settings.appearance = match theme::appearance(cx) {
+                Appearance::Light => "light", Appearance::System => "system", Appearance::Dark => "dark",
+            }.into();
+            room.settings.fps = motion::fps();
+            room.apply_look(window, cx);
+        }
         room.set_commands(cx);
         if let Some(path) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             room.open_path(PathBuf::from(path), cx);
@@ -1326,7 +1335,7 @@ impl Darkroom {
     }
 
     fn adjust(&self, cx: &App) -> Adjust {
-        let p = palette(cx);
+        let p = self.print_palette(cx);
         let s = &self.settings;
         let ink = hsla(if s.recipe.accent_ink { p.accent } else { p.fg });
         Adjust::new(&s.recipe, ink.l > hsla(p.bg).l, &self.photo.clip.frames[0].print)
@@ -1336,9 +1345,16 @@ impl Darkroom {
         ([a.brightness.to_bits(), a.contrast.to_bits(), a.gamma.to_bits()], a.invert, a.light_ink)
     }
 
-    /// The scheme's paper and ink, as the `Scheme` palette uses them.
+    // Photo colours need dark paper even when the application chrome is light.
+    fn print_palette(&self, cx: &App) -> &'static ferrite_design::tokens::Palette {
+        if self.settings.recipe.mode == Mode::Ascii {
+            theme::scheme(cx).palette(ferrite_design::tokens::Tone::Dark)
+        } else { palette(cx) }
+    }
+
+    /// The print's paper and ink.
     fn scheme_inks(&self, cx: &App) -> (Rgb, Rgb) {
-        let p = palette(cx);
+        let p = self.print_palette(cx);
         let rgb = |c: gpui::Hsla| {
             let c = Rgba::from(c);
             [c.r, c.g, c.b]

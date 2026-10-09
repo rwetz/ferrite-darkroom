@@ -276,8 +276,7 @@ ascii_colour = ink    # ink | photo | palette
 ```
 
 `FERRITE_*` variables (the shared look from
-[Lodestone](https://github.com/rwetz/ferrite-lodestone)) win over the saved
-scheme and appearance.
+[Lodestone](https://github.com/rwetz/ferrite-lodestone)) supply initial defaults. Saved app preferences win on subsequent launches.
 
 ## With Lodestone
 
