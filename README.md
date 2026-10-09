@@ -340,3 +340,13 @@ the logo changes.
 
 Apache-2.0, see [LICENSE](LICENSE). The binary embeds fonts from
 ferrite-design under their own licenses; see [NOTICE](NOTICE).
+
+## Automatic releases
+
+Every push to `main` runs the release workflow. It chooses the next available
+patch version (or honors a higher version set in `Cargo.toml`), creates a release
+commit with matching `Cargo.toml` and `Cargo.lock` versions, and tags that commit.
+Release commits stay off `main`, so the workflow cannot create a push loop.
+Builds and tests must succeed before publication. Rerunning a workflow reuses
+its tag. Manual `vMAJOR.MINOR.PATCH` tags still work when they match the package
+version. Push feature branches normally; they do not publish releases.

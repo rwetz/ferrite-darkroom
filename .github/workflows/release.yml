@@ -2,8 +2,13 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
+concurrency:
+  group: release
+  queue: max
+  cancel-in-progress: false
 permissions:
   contents: write
 
@@ -11,7 +16,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      ref: ${{ steps.release.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test release version rules
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+      - name: Prepare versioned release
+        id: release
+        run: python3 .github/scripts/prepare_release.py
+
   build:
+    needs: prepare
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     name: ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -23,6 +46,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -40,10 +65,11 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain || true
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - run: cargo test --release --locked --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
-          name="ferrite-darkroom-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="ferrite-darkroom-${RELEASE_TAG}-${{ matrix.target }}"
           mkdir -p "$name/licenses"
           bin="target/${{ matrix.target }}/release/ferrite-darkroom"
           [ -f "$bin.exe" ] && bin="$bin.exe"
@@ -65,19 +91,24 @@ jobs:
           path: ferrite-darkroom-*.${{ matrix.archive }}
 
   release:
-    needs: build
+    needs: [prepare, build]
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum ferrite-darkroom-* > SHA256SUMS.txt
-      - name: Notes from the changelog
-        run: awk -v v="${GITHUB_REF_NAME#v}" '/^## /{p = index($0, "[" v "]") > 0; next} p' CHANGELOG.md > notes.md
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Darkroom $GITHUB_REF_NAME" --notes-file notes.md
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --title "Darkroom $RELEASE_TAG" --generate-notes
+          fi
