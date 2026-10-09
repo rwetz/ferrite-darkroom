@@ -2770,6 +2770,10 @@ impl Render for Darkroom {
 gpui::actions!(darkroom, [Open, OpenRecipe, SaveRecipe, ExportPng, ExportText, CopyText, Invert, Undo, Redo, PlayPause, NextFrame, PrevFrame]);
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = cli::run(&args) {
         std::process::exit(code);

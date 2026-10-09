@@ -4,6 +4,13 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-10-09
+
+### Changed
+
+- Keep ASCII preview and export readable on dark paper in light appearance. Restore saved appearance at launch.
+- Include current Ferrite layout, window memory, and overlay fixes.
+
 ## [1.3.0] - 2026-10-07
 
 ### Changed

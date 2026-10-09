@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-darkroom"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "ab_glyph",
  "ferrite-design",
@@ -1591,7 +1591,7 @@ dependencies = [
 [[package]]
 name = "ferrite-design"
 version = "0.1.0"
-source = "git+https://github.com/rwetz/ferrite-design?rev=ebf7ee99f6265fc81875f0c798aba8a4e306e160#ebf7ee99f6265fc81875f0c798aba8a4e306e160"
+source = "git+https://github.com/rwetz/ferrite-design?rev=4ddbb40bf34e219278784fdcb4e5d0e4e76f4cdc#4ddbb40bf34e219278784fdcb4e5d0e4e76f4cdc"
 dependencies = [
  "anyhow",
  "gpui-pre",

@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-darkroom"
-version = "1.3.0"
+version = "1.3.1"
 description = "A Ferrite dither and text-art studio: photos, GIFs and video into pixel art, braille or ASCII, in twenty-nine algorithms and any palette."
 authors = ["Ryan Wetzstein"]
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
-ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "ebf7ee99f6265fc81875f0c798aba8a4e306e160" }
+ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "4ddbb40bf34e219278784fdcb4e5d0e4e76f4cdc" }
 # Must match ferrite-design exactly (PITFALLS §1).
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8" }
