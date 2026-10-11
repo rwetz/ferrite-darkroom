@@ -469,6 +469,27 @@ mod tests {
     }
 
     #[test]
+    fn added_recipes_render_nonblank_with_valid_palette_indices() {
+        let print = figure();
+        for (name, source) in crate::recipe::BUNDLED.iter().skip(9) {
+            let mut recipe = Recipe::from_toml(source).unwrap();
+            recipe.cols = 64;
+            recipe.ascii_cols = 32;
+            let colors = recipe.palette_colors(PAPER, INK);
+            let adjust = Adjust::new(&recipe, false, &print);
+            if recipe.mode == crate::recipe::Mode::Ascii {
+                let art = crate::textart::make(&print, &recipe, adjust, &colors, PAPER, INK, None);
+                assert!(!art.text().trim().is_empty(), "{name}: empty text art");
+            } else {
+                let art = develop_recipe(&print, &recipe, adjust, colors.clone(), None, None);
+                assert_eq!(art.index.len(), (art.w * art.h) as usize, "{name}");
+                assert!(art.index.iter().all(|&index| (index as usize) < colors.len()), "{name}: invalid colour");
+                assert!(art.index.iter().any(|index| *index != art.index[0]), "{name}: flat output");
+            }
+        }
+    }
+
+    #[test]
     fn reference_cutout_is_one_ink_on_clean_paper() {
         let r = bundled("Cut-out");
         let colors = r.palette_colors(PAPER, INK);

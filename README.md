@@ -132,11 +132,16 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 - **Recipes.** Everything about how a print develops (algorithm, palette,
   tone, sizes) saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
   Open one (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>, or drop it on the
-  print) to develop any photo the same way. Nine come built in, one click
+  print) to develop any photo the same way. Twenty-one come built in, one click
   each from the Recipes row: Cut-out (a subject on a plain backdrop, in
   one ink on clean paper), Lattice (a solid figure on a grid of dots),
   Dots, Newsprint, CMYK print, Engraving, Game Boy, Sunset and Braille.
-  Their files are in `recipes/`.
+  New looks include Blueprint, Archive, Riso Poster, Amber Terminal, Ice Mosaic,
+  Desert Grain, Forest Weave, Nocturne, Candy Dots, Ember Engraving, Neon Blocks
+  and Olive Press. Their files are in `recipes/`.
+  Twelve new original palettes cover blue and olive inks, archival sepia,
+  risograph colours, amber screens, ice, desert, forest, muted violet, pastels,
+  ember and neon. All are available in the palette picker and contact sheets.
 - **Export.** A picture in the palette's exact colours as PNG, JPEG, WebP,
   BMP, TIFF or SVG (vector, one path per colour)
   (<kbd>Ctrl</kbd>+<kbd>E</kbd>), sized by pixel size (1×, 2×, 4×, 8×) or by

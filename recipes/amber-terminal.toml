@@ -1,0 +1,9 @@
+# Amber character art with tone diffusion for readable terminal portraits.
+mode = "ascii"
+algorithm = "atkinson"
+palette = "amber-crt"
+glyphs = "characters"
+ascii_colour = "palette"
+ascii_cols = 100
+diffuse = true
+contrast = 1.15

@@ -1,0 +1,7 @@
+# Palette-coloured half-block text art in cyan, pink and violet.
+mode = "ascii"
+algorithm = "floyd-steinberg"
+palette = "neon-night"
+glyphs = "colour-blocks"
+ascii_colour = "palette"
+ascii_cols = 100

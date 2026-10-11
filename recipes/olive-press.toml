@@ -1,0 +1,8 @@
+# Single olive ink on cream with tight high-contrast print grain.
+mode = "dither"
+algorithm = "atkinson"
+palette = "olive-ink"
+cols = 300
+scale = 3
+paper = "lightest"
+contrast = 1.25

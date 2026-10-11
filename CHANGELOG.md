@@ -4,6 +4,16 @@ All notable changes to Darkroom are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Twelve original palettes: Cyanotype, Sepia, Risograph, Amber CRT, Ice, Desert,
+  Forest, Nocturne, Candy, Ember, Neon Night and Olive Ink.
+- Twelve bundled recipes: Blueprint, Archive, Riso Poster, Amber Terminal,
+  Ice Mosaic, Desert Grain, Forest Weave, Nocturne, Candy Dots,
+  Ember Engraving, Neon Blocks and Olive Press. Includes two text-art looks.
+
 ## [1.3.1] - 2026-10-09
 
 ### Changed

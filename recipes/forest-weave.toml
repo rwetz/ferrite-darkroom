@@ -1,0 +1,7 @@
+# Crosshatched moss and cream for foliage and organic textures.
+mode = "dither"
+algorithm = "crosshatch"
+palette = "forest"
+cols = 260
+scale = 3
+contrast = 1.1

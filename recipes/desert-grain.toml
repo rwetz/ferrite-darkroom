@@ -1,0 +1,8 @@
+# Seeded sandy stippling for stone, dunes and warm afternoon light.
+mode = "dither"
+algorithm = "stipple"
+palette = "desert"
+cols = 220
+scale = 4
+seed = 37
+strength = 0.9

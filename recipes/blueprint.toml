@@ -1,0 +1,7 @@
+# Crisp blue ink with restrained diffusion for architecture and portraits.
+mode = "dither"
+algorithm = "atkinson"
+palette = "cyanotype"
+cols = 260
+scale = 3
+contrast = 1.18

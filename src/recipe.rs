@@ -21,7 +21,7 @@ use crate::textart::{Glyphs, Tint};
 
 /// The recipes that come with Darkroom (`recipes/`), built in so each is
 /// one click from any photo: `(name, recipe file)`.
-pub const BUNDLED: [(&str, &str); 9] = [
+pub const BUNDLED: [(&str, &str); 21] = [
     ("Cut-out", include_str!("../recipes/cutout.toml")),
     ("Lattice", include_str!("../recipes/lattice.toml")),
     ("Dots", include_str!("../recipes/dots.toml")),
@@ -31,6 +31,18 @@ pub const BUNDLED: [(&str, &str); 9] = [
     ("Game Boy", include_str!("../recipes/gameboy.toml")),
     ("Sunset", include_str!("../recipes/sunset.toml")),
     ("Braille", include_str!("../recipes/braille.toml")),
+    ("Blueprint", include_str!("../recipes/blueprint.toml")),
+    ("Archive", include_str!("../recipes/archive.toml")),
+    ("Riso Poster", include_str!("../recipes/riso-poster.toml")),
+    ("Amber Terminal", include_str!("../recipes/amber-terminal.toml")),
+    ("Ice Mosaic", include_str!("../recipes/ice-mosaic.toml")),
+    ("Desert Grain", include_str!("../recipes/desert-grain.toml")),
+    ("Forest Weave", include_str!("../recipes/forest-weave.toml")),
+    ("Nocturne", include_str!("../recipes/nocturne.toml")),
+    ("Candy Dots", include_str!("../recipes/candy-dots.toml")),
+    ("Ember Engraving", include_str!("../recipes/ember-engraving.toml")),
+    ("Neon Blocks", include_str!("../recipes/neon-blocks.toml")),
+    ("Olive Press", include_str!("../recipes/olive-press.toml")),
 ];
 
 /// What the background layer (where the mask isn't) becomes.

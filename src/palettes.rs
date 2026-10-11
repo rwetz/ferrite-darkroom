@@ -55,6 +55,19 @@ pub const PRESETS: &[Preset] = &[
     Preset { key: "2-bit-grey", name: "2-bit grey", colors: &[0x000000, 0x555555, 0xaaaaaa, 0xffffff] },
     Preset { key: "vaporwave", name: "Vaporwave", colors: &[0x241734, 0xff71ce, 0x01cdfe, 0x05ffa1, 0xb967ff, 0xfffb96] },
     Preset { key: "hacker", name: "Hacker", colors: &[0x000000, 0x003b00, 0x008f11, 0x00ff41] },
+    // Original Darkroom palettes: printing inks, natural tones and luminous screens.
+    Preset { key: "cyanotype", name: "Cyanotype", colors: &[0x071d49, 0x174b83, 0x6ca6c1, 0xf1ede0] },
+    Preset { key: "sepia", name: "Sepia", colors: &[0x241b16, 0x634535, 0x9c7656, 0xd1ae7b, 0xf4e4c6] },
+    Preset { key: "risograph", name: "Risograph", colors: &[0x24263d, 0x304d8b, 0xe45664, 0xf1a58e, 0xf4d6b0, 0xfff4df] },
+    Preset { key: "amber-crt", name: "Amber CRT", colors: &[0x130e07, 0x55320c, 0xad6b16, 0xffbf52] },
+    Preset { key: "ice", name: "Ice", colors: &[0x101c35, 0x29466f, 0x4e87a0, 0x98c6ce, 0xe5f3ee] },
+    Preset { key: "desert", name: "Desert", colors: &[0x31252e, 0x714b4c, 0xa76c55, 0xd49b68, 0xe8c99a, 0xf7ecd5] },
+    Preset { key: "forest", name: "Forest", colors: &[0x122523, 0x2d4840, 0x55735a, 0x93a474, 0xd0d5a9, 0xf1eed8] },
+    Preset { key: "nocturne", name: "Nocturne", colors: &[0x101326, 0x29304b, 0x544867, 0x89778c, 0xc0a5ae, 0xefe0db] },
+    Preset { key: "candy", name: "Candy", colors: &[0x30294b, 0x7863a5, 0xe591b9, 0xf5b8ae, 0x91c8cb, 0xfbf0d9] },
+    Preset { key: "ember", name: "Ember", colors: &[0x191923, 0x593044, 0x963a3b, 0xdb6446, 0xffab5c, 0xffe1a1] },
+    Preset { key: "neon-night", name: "Neon Night", colors: &[0x090e23, 0x243772, 0x724cc4, 0xff4f9a, 0x29d8ce, 0xe5f7ff] },
+    Preset { key: "olive-ink", name: "Olive Ink", colors: &[0x303c2d, 0xf0ecd5] },
 ];
 
 pub fn by_key(key: &str) -> Option<&'static Preset> {

@@ -1,0 +1,8 @@
+# Separated cool square tiles for icy landscapes and graphic portraits.
+mode = "dither"
+algorithm = "bayer"
+palette = "ice"
+cols = 140
+scale = 6
+shape = "square"
+gutter = 0.18

@@ -1,0 +1,7 @@
+# Soft muted violet diffusion for night scenes and low-key portraits.
+mode = "dither"
+algorithm = "sierra"
+palette = "nocturne"
+cols = 280
+scale = 3
+gamma = 1.15

@@ -1,0 +1,7 @@
+# Fine warm grain for archival photographs and softly lit portraits.
+mode = "dither"
+algorithm = "stucki"
+palette = "sepia"
+cols = 320
+scale = 3
+gamma = 1.12

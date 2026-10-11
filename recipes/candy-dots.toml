@@ -1,0 +1,9 @@
+# Pastel circular cells that grow with tone, designed for playful illustrations.
+mode = "dither"
+algorithm = "bayer-8"
+palette = "candy"
+cols = 100
+scale = 8
+shape = "circle"
+gutter = 0.2
+modulate = true

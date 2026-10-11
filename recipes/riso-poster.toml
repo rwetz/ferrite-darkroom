@@ -1,0 +1,8 @@
+# Coarse geometric screening in blue, coral and warm paper.
+mode = "dither"
+algorithm = "bayer-8"
+palette = "risograph"
+cols = 180
+scale = 5
+strength = 0.8
+contrast = 1.2

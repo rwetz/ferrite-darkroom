@@ -1,0 +1,7 @@
+# Engraved red and gold marks for dramatic silhouettes and warm highlights.
+mode = "dither"
+algorithm = "engrave"
+palette = "ember"
+cols = 240
+scale = 4
+contrast = 1.25
