@@ -8,6 +8,10 @@ All notable changes to Darkroom are listed here. The format follows
 
 ### Added
 
+- Full-workspace recipe browser with previews of the current photo, Print/Pixel/Text
+  categories, persistent favorites, descriptions, palette swatches, and direct
+  Apply/Compare actions. Previews develop in the background and are cached.
+
 - Twelve original palettes: Cyanotype, Sepia, Risograph, Amber CRT, Ice, Desert,
   Forest, Nocturne, Candy, Ember, Neon Night and Olive Ink.
 - Twelve bundled recipes: Blueprint, Archive, Riso Poster, Amber Terminal,

@@ -17,11 +17,12 @@ pub struct Settings {
     pub size: Size,
     pub frame: Frame,
     pub recipe: Recipe,
+    pub favorite_recipes: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { scheme: "ferrite".into(), appearance: "dark".into(), fps: 240, format: Format::Png, size: Size::Scale, frame: Frame::default(), recipe: Recipe::default() }
+        Self { scheme: "ferrite".into(), appearance: "dark".into(), fps: 240, format: Format::Png, size: Size::Scale, frame: Frame::default(), recipe: Recipe::default(), favorite_recipes: Vec::new() }
     }
 }
 
@@ -40,6 +41,10 @@ impl Settings {
                 "export_format" => s.format = Format::from_key(&v).unwrap_or(s.format),
                 "export_size" => s.size = Size::parse(&v).unwrap_or(s.size),
                 "export_frame" => s.frame = Frame::parse(&v).unwrap_or(s.frame),
+                "favorite_recipes" => {
+                    s.favorite_recipes = v.split(',').filter(|key| recipe::BUNDLED.iter().any(|(name, _)| crate::browser::key(name) == *key)).map(str::to_string).collect();
+                    s.favorite_recipes.sort(); s.favorite_recipes.dedup();
+                }
                 _ => {}
             }
         }
@@ -48,13 +53,14 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "# Darkroom settings.\nscheme = {}\nappearance = {}\nfps = {}\nexport_format = {}\nexport_size = {}\nexport_frame = {}\n{}",
+            "# Darkroom settings.\nscheme = {}\nappearance = {}\nfps = {}\nexport_format = {}\nexport_size = {}\nexport_frame = {}\nfavorite_recipes = {}\n{}",
             self.scheme,
             self.appearance,
             self.fps,
             self.format.key(),
             self.size.key(),
             self.frame.key(),
+            self.favorite_recipes.join(","),
             self.recipe.flat_lines()
         )
     }
@@ -93,6 +99,14 @@ mod tests {
     use crate::fit::Set;
 
     #[test]
+    fn favorites_ignore_unknown_and_duplicate_keys() {
+        let settings = Settings::parse("favorite_recipes = blueprint,unknown,blueprint,game-boy\n");
+        assert_eq!(settings.favorite_recipes, ["blueprint", "game-boy"]);
+        assert_eq!(Settings::parse(&settings.serialize()).favorite_recipes, settings.favorite_recipes);
+        assert!(Settings::parse("mode = dither\n").favorite_recipes.is_empty());
+    }
+
+    #[test]
     fn round_trips() {
         let s = Settings {
             scheme: "cyanotype".into(),
@@ -102,6 +116,7 @@ mod tests {
             size: Size::Long(7680),
             frame: Frame { aspect: Some((21, 9)), fill: false },
             recipe: Recipe { mode: Mode::Ascii, algo: Algo::Stucki, palette: "gameboy".into(), cols: 320, gamma: 1.8, ..Recipe::default() },
+            favorite_recipes: vec!["blueprint".into(), "game-boy".into()],
         };
         assert_eq!(Settings::parse(&s.serialize()), s);
     }

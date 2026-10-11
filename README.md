@@ -129,8 +129,12 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
   or anywhere else: `.hex`, GIMP `.gpl`, JASC `.pal`, paint.net `.txt`, or a
   palette image (its distinct colours). Or copy hex colours from anywhere and
   *Paste hex*. Dropping a palette file on the print imports it too.
-- **Recipes.** Everything about how a print develops (algorithm, palette,
-  tone, sizes) saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
+- **Recipes.** Open **Recipes → Browse recipes** to see the current photo through each look.
+  Filter Print, Pixel or Text, favorite looks for later, inspect palette swatches,
+  and choose Apply or Compare to jump into the existing before/after split view.
+  Favorites persist between launches; previews render in the background.
+  Everything about how a print develops (algorithm, palette, tone, sizes)
+  saves as a small TOML file (<kbd>Ctrl</kbd>+<kbd>S</kbd>).
   Open one (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>, or drop it on the
   print) to develop any photo the same way. Twenty-one come built in, one click
   each from the Recipes row: Cut-out (a subject on a plain backdrop, in

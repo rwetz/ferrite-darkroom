@@ -13,6 +13,7 @@
 
 mod algos;
 mod batch;
+mod browser;
 mod cli;
 mod engine;
 mod export;
@@ -40,7 +41,7 @@ use ferrite_design::ascii::Fit;
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, Corners, Entity, ExternalPaths, Hsla, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, Render, RenderImage, Rgba, Subscription, Window,
-    canvas, div, fill, point, px, size,
+    StyledImage, canvas, div, fill, point, px, size,
 };
 use ferrite_design::prelude::*;
 
@@ -83,6 +84,7 @@ enum View {
     Compare,
     /// One thumbnail per algorithm or palette; click to adopt.
     Sheet,
+    Recipes,
     /// The photo with the background dimmed: paint here, or pick a key colour.
     Mask,
 }
@@ -391,6 +393,9 @@ type Typeset = (u64, Rc<TextArt>);
 
 struct Darkroom {
     settings: Settings,
+    recipe_category: browser::Category,
+    recipe_previews: Option<(u64, Vec<browser::Preview>)>,
+    recipe_preview_job: Option<u64>,
     photo: Photo,
     loading: bool,
     /// Bumped per photo, to replay the develop effect.
@@ -443,6 +448,9 @@ impl Darkroom {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut room = Self {
             settings: Settings::load(),
+            recipe_category: browser::Category::All,
+            recipe_previews: None,
+            recipe_preview_job: None,
             photo: Photo::sample(),
             loading: false,
             roll: 0,
@@ -559,14 +567,18 @@ impl Darkroom {
     /// recipe, the export, the frame, the theme.
     fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(s) = self.undo.pop() {
+            let favorites = self.settings.favorite_recipes.clone();
             self.redo.push(std::mem::replace(&mut self.settings, s));
+            self.settings.favorite_recipes = favorites;
             self.restored(window, cx);
         }
     }
 
     fn redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(s) = self.redo.pop() {
+            let favorites = self.settings.favorite_recipes.clone();
             self.undo.push(std::mem::replace(&mut self.settings, s));
+            self.settings.favorite_recipes = favorites;
             self.restored(window, cx);
         }
     }
@@ -623,6 +635,7 @@ impl Darkroom {
     }
 
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
+        if view == View::Recipes && self.playing { self.toggle_play(cx); }
         self.view = view;
         cx.notify();
     }
@@ -656,6 +669,7 @@ impl Darkroom {
             command("Import mask…").group("Mask").icon(Icon::Folder).on_run(run(|this, _, cx| this.import_mask(cx))),
             command("Export mask…").group("Mask").icon(Icon::File).on_run(run(|this, _, cx| this.export_mask(cx))),
             command("Clear painted mask").group("Mask").on_run(run(|this, _, cx| this.clear_paint(cx))),
+            command("Browse recipes").group("Recipe").on_run(run(|this, _, cx| this.set_view(View::Recipes, cx))),
             command("View: print").group("View").on_run(run(|this, _, cx| this.set_view(View::Print, cx))),
             command("View: compare with the photo").group("View").on_run(run(|this, _, cx| this.set_view(View::Compare, cx))),
             command("View: contact sheet of algorithms").group("View").on_run(run(|this, _, cx| {
@@ -1635,11 +1649,85 @@ impl Darkroom {
 
     // ── Views ────────────────────────────────────────────────────────────
 
+    fn recipe_browser(&mut self, room_w: f32, room_h: f32, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let p = palette(cx);
+        let dark = theme::scheme(cx).palette(ferrite_design::tokens::Tone::Dark);
+        let rgb = |c| { let c = Rgba::from(hsla(c)); [c.r, c.g, c.b] };
+        let inks = [[rgb(p.bg), rgb(p.fg), rgb(p.accent)], [rgb(dark.bg), rgb(dark.fg), rgb(dark.accent)]];
+        let input = key_of((self.roll, self.photo.frame, self.paint_rev, inks.map(|group| group.map(|c| c.map(f32::to_bits)))));
+        let ready = self.recipe_previews.as_ref().is_some_and(|(key, _)| *key == input);
+        if !ready && self.recipe_preview_job.is_none() {
+            self.recipe_preview_job = Some(input);
+            let print = self.photo.print().clone();
+            let reference = self.photo.clip.frames[0].print.clone();
+            let paint = self.paint.clone();
+            cx.spawn(async move |this, cx| {
+                let previews = cx.background_executor().spawn(async move { browser::previews(&print, &reference, inks, paint.as_ref()) }).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.recipe_previews = Some((input, previews));
+                    this.recipe_preview_job = None;
+                    cx.notify();
+                });
+            }).detach();
+        }
+        let categories = browser::Category::ALL;
+        let header = div().flex().flex_row().flex_wrap().items_center().gap_3()
+            .child(categories.iter().fold(segmented("recipe-categories"), |seg, category| seg.option(category.name()))
+                .selected(categories.iter().position(|category| *category == self.recipe_category).unwrap_or(0))
+                .on_select(cx.listener(move |this, index: &usize, _, cx| { this.recipe_category = categories[*index]; cx.notify(); })))
+            .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("Previews use this photo. Apply a look, then tune it."));
+        let mut cards = Vec::new();
+        if ready {
+            let previews = &self.recipe_previews.as_ref().unwrap().1;
+            let columns = (room_w / 290.).floor().max(1.);
+            let width = ((room_w - 12. * (columns - 1.)) / columns).max(200.);
+            for (i, preview) in previews.iter().enumerate() {
+                let (name, source) = recipe::BUNDLED[i];
+                let key = browser::key(name);
+                let favorite = self.settings.favorite_recipes.contains(&key);
+                let category = browser::category(name, &preview.recipe);
+                if self.recipe_category == browser::Category::Favorites && !favorite { continue; }
+                if !matches!(self.recipe_category, browser::Category::All | browser::Category::Favorites) && self.recipe_category != category { continue; }
+                let image = self.tex.get(key_of(("recipe-preview", input, i)), || (preview.w, preview.h, preview.bgra.clone()));
+                let swatches = preview.colors.iter().map(|&[r, g, b]| div().flex_1().h(px(12.)).bg(Rgba { r, g, b, a: 1. }));
+                let palette_name = palettes::by_key(&preview.recipe.palette).map_or("Custom", |palette| palette.name);
+                let active = self.settings.recipe == preview.recipe;
+                cards.push(panel(name).w(px(width)).flex_none()
+                    .child(div().h(px(180.)).w_full().flex().items_center().justify_center().overflow_hidden()
+                        .child(gpui::img(image).w_full().h_full().object_fit(gpui::ObjectFit::Contain)))
+                    .child(div().flex().flex_row().gap_1().children(swatches))
+                    .child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(format!("{} / {palette_name}", category.name())))
+                    .child(div().min_h(px(64.)).body(text::SM).child(browser::description(source)))
+                    .child(div().flex().flex_row().flex_wrap().items_center().gap_2()
+                        .child(Button::new(("recipe-apply", i)).label(if active { "Applied" } else { "Apply" }).primary().small()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| { this.use_bundled(i, cx); this.set_view(View::Print, cx); })))
+                        .child(Button::new(("recipe-compare", i)).label("Compare").secondary().small()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| { this.use_bundled(i, cx); this.set_view(View::Compare, cx); })))
+                        .child(Button::new(("recipe-favorite", i)).label(if favorite { "Favorited" } else { "Favorite" }).icon(if favorite { Icon::Check } else { Icon::Plus }).ghost().small()
+                            .tooltip(if favorite { "Remove from favorites" } else { "Add to favorites" }).selected(favorite)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if this.settings.favorite_recipes.contains(&key) { this.settings.favorite_recipes.retain(|favorite| favorite != &key); }
+                                else { this.settings.favorite_recipes.push(key.clone()); this.settings.favorite_recipes.sort(); }
+                                this.save(cx);
+                            })))))
+            }
+        }
+        let empty = ready && cards.is_empty();
+        div().flex().flex_col().w(px(room_w.max(240.))).h(px(room_h.max(180.))).gap_3()
+            .child(header)
+            .when(!ready, |view| view.child(spinner("recipe-previews-loading")).child("Developing recipe previews…"))
+            .when(empty, |view| view.child(empty_state("No favorites yet", "Choose Favorite on a recipe in All, Print, Pixel or Text.", window, cx)))
+            .child(div().id("recipe-browser-scroll").flex_1().min_h_0().overflow_y_scroll()
+                .child(div().flex().flex_row().flex_wrap().items_start().gap_3().children(cards)))
+            .into_any_element()
+    }
+
     fn preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let p = palette(cx);
         // The room the print has: the window less the sidebar, chrome and padding.
         let view = window.viewport_size();
-        let (room_w, room_h) = (f32::from(view.width) - PANEL - RAIL - 96., f32::from(view.height) - 250.);
+        let (room_w, room_h) = (f32::from(view.width) - if self.view == View::Recipes { 64. } else { PANEL + RAIL + 96. }, f32::from(view.height) - 250.);
+        if self.view == View::Recipes { return self.recipe_browser(room_w, room_h, window, cx).into_any_element(); }
         let sf = window.scale_factor();
         let room_h = if self.photo.frames() > 1 && self.view != View::Sheet { room_h - 44. } else { room_h };
         let zoom = self.zoom;
@@ -1802,8 +1890,9 @@ impl Darkroom {
     fn view_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let r = &self.settings.recipe;
         let mode = r.mode;
-        let views = [View::Print, View::Compare, View::Sheet, View::Mask];
+        let views = [View::Print, View::Compare, View::Sheet, View::Mask, View::Recipes];
         let name = |v: &View| match v {
+            View::Recipes => "Recipes",
             View::Print => "Print",
             View::Compare => "Compare",
             View::Sheet => "Sheet",
@@ -1846,7 +1935,7 @@ impl Darkroom {
                     .selected(views.iter().position(|v| *v == self.view).unwrap_or(0))
                     .on_select(cx.listener(move |this, i: &usize, _, cx| this.set_view(views[*i], cx))),
             );
-        if self.view != View::Sheet {
+        if !matches!(self.view, View::Sheet | View::Recipes) {
             bar = bar.child(
                 Zoom::ALL
                     .iter()
@@ -1897,7 +1986,7 @@ impl Darkroom {
                 };
                 bar = bar.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child(hint))
             }
-            View::Print => {}
+            View::Print | View::Recipes => {}
         }
         bar
     }
@@ -2420,6 +2509,7 @@ impl Darkroom {
     /// The title bar's menus: recipes, and the theme.
     fn recipes_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let mut menu = dropdown_menu("recipes-menu").trigger(Button::new("recipes-trigger").label("Recipes").icon(Icon::ChevronDown).ghost().small()).label("Looks");
+        menu = menu.item(menu_item("Browse recipes").icon(Icon::Search).on_select(Self::act(cx, |this, _, cx| this.set_view(View::Recipes, cx)))).separator();
         for (i, (name, _)) in recipe::BUNDLED.iter().enumerate() {
             menu = menu.item(menu_item(*name).on_select(Self::act(cx, move |this, _, cx| this.use_bundled(i, cx))));
         }
@@ -2680,7 +2770,7 @@ impl Render for Darkroom {
         let preview = self.preview(window, cx);
         self.tex.end(window);
         let view_bar = Some(self.view_bar(cx));
-        let timeline = (self.photo.frames() > 1 && self.view != View::Sheet).then(|| self.timeline(cx));
+        let timeline = (self.photo.frames() > 1 && !matches!(self.view, View::Sheet | View::Recipes)).then(|| self.timeline(cx));
         let drop_hint = hsla(p.raised);
         let palette_strip = self.palette_strip(window, cx);
         let print = panel("Print").meta(size_meta).flex_1().min_w_0().min_h_0().children(view_bar.map(|bar| div().px_2().pb_2().child(bar))).child(
@@ -2701,7 +2791,7 @@ impl Render for Darkroom {
                     }
                 }))
                 .child(if self.loading { spinner("loading").into_any_element() } else { preview })
-                .when(self.photo.path.is_none() && self.view != View::Sheet, |el| {
+                .when(self.photo.path.is_none() && !matches!(self.view, View::Sheet | View::Recipes), |el| {
                     el.child(div().body(text::SM).text_color(hsla(p.fg_dim)).child("A sample print. Drop a photo, a GIF or a video here, or open one with Ctrl+O."))
                 }),
         )
@@ -2748,7 +2838,7 @@ impl Render for Darkroom {
                 .child(self.palette.clone())
                 .child(self.toaster.clone())
                 .child(title_bar("Darkroom").child(open).child(recipes).child(theme).child(undo).child(redo))
-                .child(div().flex().flex_row().flex_1().min_h_0().gap(space::ROW).p(space::ROW).child(rail).child(print).child(sidebar))
+                .child(div().flex().flex_row().flex_1().min_h_0().gap(space::ROW).p(space::ROW).when(self.view != View::Recipes, |row| row.child(rail)).child(print).when(self.view != View::Recipes, |row| row.child(sidebar)))
                 .child(
                     status_bar()
                         .left(match self.settings.recipe.mode {
