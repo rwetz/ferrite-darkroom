@@ -85,10 +85,23 @@ jobs:
           else
             tar czf "$name.tar.gz" "$name"
           fi
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis --version=3.13.0 -y --no-progress
+      - name: Windows setup installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python .github/scripts/package_windows.py --source "ferrite-darkroom-${{ env.RELEASE_TAG }}-${{ matrix.target }}" --tag "${{ env.RELEASE_TAG }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ferrite-darkroom-*.${{ matrix.archive }}
+          path: |
+            ferrite-darkroom-*.${{ matrix.archive }}
+            ferrite-darkroom-*-setup.exe
 
   release:
     needs: [prepare, build]
