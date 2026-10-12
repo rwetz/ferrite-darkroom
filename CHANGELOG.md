@@ -6,6 +6,8 @@ All notable changes to Darkroom are listed here. The format follows
 
 ## [Unreleased]
 
+- Under 1050px wide the tone rail stacks over the develop panel, so the print keeps its room.
+
 ### Added
 
 - Full-workspace recipe browser with previews of the current photo, Print/Pixel/Text

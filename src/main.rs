@@ -64,6 +64,9 @@ const RAIL: f32 = 220.;
 /// Slider widths in the panel and the rail.
 const PANEL_SLIDER: f32 = 230.;
 const RAIL_SLIDER: f32 = 120.;
+/// Below this window width the tone rail stacks over the develop panel, so
+/// the print keeps its room.
+const STACK_BELOW: f32 = 1050.;
 /// ASCII contact-sheet thumbnails: characters across.
 const THUMB_CHARS: u32 = 56;
 /// Contact-sheet thumbnails: art width, and the narrowest a tile gets.
@@ -1726,7 +1729,9 @@ impl Darkroom {
         let p = palette(cx);
         // The room the print has: the window less the sidebar, chrome and padding.
         let view = window.viewport_size();
-        let (room_w, room_h) = (f32::from(view.width) - if self.view == View::Recipes { 64. } else { PANEL + RAIL + 96. }, f32::from(view.height) - 250.);
+        let beside = if f32::from(view.width) < STACK_BELOW { PANEL + 64. } else { PANEL + RAIL + 96. };
+        let (room_w, room_h) = (f32::from(view.width) - if self.view == View::Recipes { 64. } else { beside }, f32::from(view.height) - 250.);
+        let (room_w, room_h) = (room_w.max(120.), room_h.max(120.));
         if self.view == View::Recipes { return self.recipe_browser(room_w, room_h, window, cx).into_any_element(); }
         let sf = window.scale_factor();
         let room_h = if self.photo.frames() > 1 && self.view != View::Sheet { room_h - 44. } else { room_h };
@@ -2354,7 +2359,7 @@ impl Darkroom {
     }
 
     /// The tone rail: levels and tone, the same in both modes, always in view.
-    fn tone_rail(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn tone_rail(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let r = &self.settings.recipe;
         let row = |id: &'static str, label: &'static str, (lo, hi, step): (f32, f32, f32), value: f32, fmt: fn(f32) -> String, set: fn(&mut Recipe, f32), cx: &mut Context<Self>| {
             field(id, label).stacked().child(
@@ -2367,7 +2372,7 @@ impl Darkroom {
                     .on_change(cx.listener(move |this, v: &f32, window, cx| this.change(|s| set(&mut s.recipe, *v), window, cx))),
             )
         };
-        panel("Tone").w(px(RAIL)).flex_none().min_h_0().child(
+        panel("Tone").w(px(width)).flex_none().min_h_0().child(
             scroll_area("tone-scroll").flex_1().min_h_0().child(
                 div()
                     .flex()
@@ -2805,7 +2810,8 @@ impl Render for Darkroom {
         let theme = self.theme_menu(cx);
         let export_dims = self.export_dims(cx);
         let sidebar = self.sidebar(export_dims, cx);
-        let rail = self.tone_rail(cx);
+        let stacked = f32::from(window.viewport_size().width) < STACK_BELOW;
+        let rail = self.tone_rail(if stacked { PANEL } else { RAIL }, cx);
 
         window_frame().child(power_on_in(
             "power",
@@ -2838,7 +2844,21 @@ impl Render for Darkroom {
                 .child(self.palette.clone())
                 .child(self.toaster.clone())
                 .child(title_bar("Darkroom").child(open).child(recipes).child(theme).child(undo).child(redo))
-                .child(div().flex().flex_row().flex_1().min_h_0().gap(space::ROW).p(space::ROW).when(self.view != View::Recipes, |row| row.child(rail)).child(print).when(self.view != View::Recipes, |row| row.child(sidebar)))
+                .child(div().flex().flex_row().flex_1().min_h_0().gap(space::ROW).p(space::ROW).map(|row| match (self.view == View::Recipes, stacked) {
+                    (true, _) => row.child(print),
+                    (false, false) => row.child(rail).child(print).child(sidebar),
+                    // Narrow: the print, then the tone rail over the develop
+                    // panel, sharing the height (rows, so each panel stretches).
+                    (false, true) => row.child(print).child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_none()
+                            .gap(space::ROW)
+                            .child(div().flex().flex_row().flex_1().min_h_0().child(rail))
+                            .child(div().flex().flex_row().flex_1().min_h_0().child(sidebar)),
+                    ),
+                }))
                 .child(
                     status_bar()
                         .left(match self.settings.recipe.mode {
