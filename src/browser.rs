@@ -56,7 +56,7 @@ pub fn previews(print: &Print, reference: &Print, inks: [[Rgb; 3]; 2], paint: Op
                 let (nw, nh) = text.native();
                 let factor = (256. / nw.max(1) as f32).min(192. / nh.max(1) as f32);
                 let (w, h, mut rgba) = text.raster_sized((nw as f32 * factor).max(1.) as u32, (nh as f32 * factor).max(1.) as u32);
-                for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+                for pixel in rgba.as_chunks_mut::<4>().0 { pixel.swap(0, 2); }
                 (w, h, rgba)
             }
         };
