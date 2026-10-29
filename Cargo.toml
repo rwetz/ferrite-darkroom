@@ -21,6 +21,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 gif = "0.14"
 png = "0.18"
 ab_glyph = "0.2.32"
+resvg = { version = "0.49.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 
 # gpui is sluggish unoptimised; optimise dependencies even in dev builds.
 [profile.dev.package."*"]

@@ -13,6 +13,8 @@ All notable changes to Darkroom are listed here. The format follows
 - Full-workspace recipe browser with previews of the current photo, Print/Pixel/Text
   categories, persistent favorites, descriptions, palette swatches, and direct
   Apply/Compare actions. Previews develop in the background and are cached.
+- Open SVG files as input (app, command line and batch). They are rasterised at the
+  working width, with transparency on white paper, then developed like any photo.
 
 - Twelve original palettes: Cyanotype, Sepia, Risograph, Amber CRT, Ice, Desert,
   Forest, Nocturne, Candy, Ember, Neon Night and Olive Ink.

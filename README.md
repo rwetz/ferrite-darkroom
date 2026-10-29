@@ -42,7 +42,7 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 
 - **Bring a photo, an animation or a video.** Drop it on the print, open one
   with <kbd>Ctrl</kbd>+<kbd>O</kbd>, or pass a path: `ferrite-darkroom photo.jpg`.
-  PNG, JPEG, GIF, BMP and WebP, animated GIF, APNG and WebP, and with
+  PNG, JPEG, GIF, BMP, WebP and SVG (rasterised), animated GIF, APNG and WebP, and with
   [ffmpeg](https://ffmpeg.org/download.html) installed, video (MP4, MOV,
   WebM, MKV, AVI), sampled at 15 frames a second. A built-in sample print
   is there to start.

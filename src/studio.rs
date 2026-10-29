@@ -76,8 +76,11 @@ impl Print {
 
 /// Open a photo from disk as a working print.
 pub fn load(path: &Path) -> Result<Print, String> {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        return load_svg(path);
+    }
     let img = image::open(path).map_err(|e| match e {
-        image::ImageError::Unsupported(_) => "that isn't an image Darkroom can read (PNG, JPEG, GIF, BMP, WebP)".to_string(),
+        image::ImageError::Unsupported(_) => "that isn't an image Darkroom can read (PNG, JPEG, GIF, BMP, WebP, SVG)".to_string(),
         image::ImageError::IoError(e) => e.to_string(),
         e => format!("couldn't read the image: {e}"),
     })?;
@@ -88,6 +91,29 @@ pub fn load(path: &Path) -> Result<Print, String> {
     }
     let print = Print::from_rgb(w, h, img.pixels().map(|p| p.0.map(|c| c as f32 / 255.)).collect());
     Ok(if w > WORK_W { print.resize(WORK_W, ((h as f32 / w as f32) * WORK_W as f32).round() as u32) } else { print })
+}
+
+/// Rasterise an SVG at the working width (vectors have no native resolution,
+/// so small ones scale up). Transparent areas land on white paper.
+fn load_svg(path: &Path) -> Result<Print, String> {
+    use resvg::{tiny_skia, usvg};
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut opt = usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+    let tree = usvg::Tree::from_data(&data, &opt).map_err(|e| format!("couldn't read the SVG: {e}"))?;
+    let size = tree.size();
+    if size.width() <= 0. || size.height() <= 0. {
+        return Err("the SVG is empty".into());
+    }
+    let w = WORK_W;
+    let h = ((size.height() / size.width()) * w as f32).round().max(1.) as u32;
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or("the SVG is too large")?;
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let scale = w as f32 / size.width();
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    // The pixmap is opaque after the white fill, so premultiplied == straight.
+    let rgb = pixmap.pixels().iter().map(|p| [p.red(), p.green(), p.blue()].map(|c| c as f32 / 255.)).collect();
+    Ok(Print::from_rgb(w, h, rgb))
 }
 
 /// A test print to work on before you've brought a photo: a lit sphere on
@@ -332,6 +358,28 @@ mod tests {
 
     const INK: Rgb = [1., 0.66, 0.23];
     const PAPER: Rgb = [0.07, 0.07, 0.08];
+
+    #[test]
+    fn svg_opens_on_white_paper() {
+        let dir = std::env::temp_dir().join(format!("darkroom-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("half.svg");
+        // A black left half on a transparent ground, twice as wide as tall.
+        std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="10" height="10"/></svg>"#).unwrap();
+        let print = load(&path).unwrap();
+        assert_eq!((print.w, print.h), (WORK_W, WORK_W / 2));
+        let at = |x: u32, y: u32| print.rgb[(y * print.w + x) as usize];
+        assert!(at(10, 10).iter().all(|&c| c < 0.01), "ink");
+        assert!(at(print.w - 10, 10).iter().all(|&c| c > 0.99), "paper");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn the_logo_svg_opens() {
+        let print = load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo.svg"))).unwrap();
+        assert_eq!(print.w, WORK_W);
+    }
 
     fn grey(w: u32, h: u32, lum: Vec<f32>) -> Print {
         Print::from_rgb(w, h, lum.into_iter().map(|l| [l; 3]).collect())

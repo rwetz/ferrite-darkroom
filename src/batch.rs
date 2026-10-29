@@ -29,7 +29,7 @@ pub struct Job {
 pub type Outcome = (Vec<PathBuf>, Vec<(PathBuf, String)>);
 
 /// The files a folder batch picks up.
-const INPUTS: [&str; 14] = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "apng", "mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg"];
+const INPUTS: [&str; 15] = ["svg", "png", "jpg", "jpeg", "gif", "bmp", "webp", "apng", "mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg"];
 
 impl Job {
     /// The scheme's colours by key and appearance, without a window.
