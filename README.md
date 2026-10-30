@@ -359,3 +359,12 @@ Release commits stay off `main`, so the workflow cannot create a push loop.
 Builds and tests must succeed before publication. Rerunning a workflow reuses
 its tag. Manual `vMAJOR.MINOR.PATCH` tags still work when they match the package
 version. Push feature branches normally; they do not publish releases.
+
+---
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/heptagram-white.svg">
+    <img src="docs/brand/heptagram-black.svg" alt="heptagram" width="48">
+  </picture>
+</p>
